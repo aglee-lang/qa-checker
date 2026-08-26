@@ -1,3 +1,4 @@
+import sys
 import re
 import os
 import io
@@ -5,13 +6,14 @@ import time
 import base64
 import requests
 import json
+import subprocess
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 from PIL import Image
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
-st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (終極防卡死版)")
+st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (環境路徑修復版)")
 
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
@@ -23,8 +25,19 @@ LANG_MAP = {
     "印地語": "hi", "印地文": "hi", "印尼文": "id", "印尼語": "id", "西文": "es", "西班牙文": "es"
 }
 
+# 系統啟動時一次性安裝與初始化 Chromium 瀏覽器
+@st.cache_resource
+def prepare_browser_environment():
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "playwright"], check=False)
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
+    except Exception:
+        pass
+
+prepare_browser_environment()
+
 st.sidebar.header("⚙️ 系統設定")
-st.sidebar.success("✅ 系統已順利連線運作 (獨立進程保護中)")
+st.sidebar.success("✅ 系統已順利連線運作")
 
 mode = st.sidebar.radio("選擇對稿模式：", ["📂 批次自動對稿 (預設總控表)", "單一活動對稿"])
 
@@ -104,47 +117,35 @@ def build_lang_url(base_url, lang_code):
         return f"{base_url}?lang={lang_code}"
 
 def capture_webpage(target_url, output_filename="temp_screenshot.png"):
-    """
-    終極防卡死：將截圖功能寫入獨立檔案並用 subprocess 呼叫。
-    若超過 35 秒未完成，系統將直接強制擊殺該進程，保證主程式永不卡死！
-    """
     script_content = f"""
 import os
 import time
-try:
-    from playwright.sync_api import sync_playwright
-except ImportError:
-    os.system("pip install playwright && playwright install chromium")
-    from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright
 
-os.system("playwright install chromium")
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'])
     page = browser.new_page(viewport={{"width": 1280, "height": 800}})
     try:
-        # 強制 20 秒 Timeout，只等 DOM 載入
         page.goto('{target_url}', timeout=20000, wait_until='domcontentloaded')
         time.sleep(3)
     except Exception as e:
-        print("Goto timeout, but forcing screenshot anyway...")
+        pass
     page.screenshot(path='{output_filename}', full_page=True)
     browser.close()
 """
     with open("take_screenshot.py", "w", encoding="utf-8") as f:
         f.write(script_content)
 
-    import subprocess
+    # 關鍵修正：使用 sys.executable 準確指引至 Streamlit 雲端虛擬環境的 Python 執行檔
     try:
-        # 啟動獨立進程，設定 35 秒強制死線
-        subprocess.run(["python", "take_screenshot.py"], timeout=35, check=True, capture_output=True)
+        res = subprocess.run([sys.executable, "take_screenshot.py"], timeout=35, capture_output=True, text=True)
+        if res.returncode != 0:
+            raise RuntimeError(f"截圖腳本異常：{res.stderr.strip()}")
     except subprocess.TimeoutExpired:
-        raise RuntimeError("網頁載入卡死超時 (已強制阻斷)，請確認目標網頁是否可正常連線。")
-    except subprocess.CalledProcessError as e:
-        err_msg = e.stderr.decode('utf-8', errors='ignore')
-        raise RuntimeError(f"截圖系統發生異常: {err_msg}")
+        raise RuntimeError("網頁載入超時 (35秒)，已自動阻斷避免卡死。")
     
     if not os.path.exists(output_filename):
-        raise RuntimeError("未能成功產生截圖檔案。")
+        raise RuntimeError("未能順利生成截圖檔案。")
 
     return output_filename
 
