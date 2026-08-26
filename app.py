@@ -100,12 +100,11 @@ def run_ai_qa(sheet_context, img_path, lang_hint=""):
         "X-Title": "QA Checker"
     }
     
-    # 多模型輪替策略
+    # 更新為目前 OpenRouter 最穩定可用的 Vision 模型清單
     candidate_models = [
-        "google/gemini-2.0-flash-exp:free",
-        "meta-llama/llama-3.2-11b-vision-instruct:free",
-        "google/gemini-flash-1.5-8b",
         "google/gemini-2.0-flash-001",
+        "google/gemini-2.0-flash-lite-001",
+        "openai/gpt-4o-mini",
         "google/gemini-flash-1.5"
     ]
 
