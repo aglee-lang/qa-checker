@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 from PIL import Image
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
-st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統")
+st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (時區精準對照版)")
 
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
@@ -24,8 +24,18 @@ LANG_MAP = {
     "印地語": "hi", "印地文": "hi", "印尼文": "id", "印尼語": "id", "西文": "es", "西班牙文": "es"
 }
 
+# 依據企劃公式硬性定義時區對應的時間表
+TIMEZONE_RULES = {
+    "GMT+8": {"start": "12:00 PM", "end": "11:59 AM"},
+    "GMT+7": {"start": "11:00 AM", "end": "10:59 AM"},
+    "GMT+6": {"start": "10:00 AM", "end": "09:59 AM"},
+    "GMT+5.5": {"start": "09:30 AM", "end": "09:29 AM"},
+    "GMT+5": {"start": "09:00 AM", "end": "08:59 AM"},
+    "GMT-3": {"start": "01:00 AM", "end": "00:59 AM"}
+}
+
 st.sidebar.header("⚙️ 系統設定")
-st.sidebar.success("✅ 系統連線正常 (完全對齊最新欄位名稱)")
+st.sidebar.success("✅ 系統連線正常 (時區公式比對載入中)")
 
 mode = st.sidebar.radio("選擇對稿模式：", ["📂 批次自動對稿 (預設總控表)", "單一活動對稿"])
 
@@ -53,7 +63,6 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 def get_smart_column_value(row_dict, target_keywords):
-    """準確匹配總控表欄位標題"""
     for key, val in row_dict.items():
         clean_key = str(key).strip().replace(" ", "").lower()
         for kw in target_keywords:
@@ -75,10 +84,12 @@ def fetch_sheet_text_and_languages(sheet_input):
     
     content_summary = []
     detected_languages = []
+    target_timezone = "未指定"
     
     first_sheet = doc.worksheets()[0]
     records_first = first_sheet.get_all_values()
     
+    # 讀取語言 (列 10) 與 時區 (列 11 / B欄 "活動時差統一")
     for row_idx, row in enumerate(records_first[:20]):
         row_str = "".join(row)
         if "預設語言" in row_str or "次要語言" in row_str or row_idx == 9:
@@ -90,7 +101,10 @@ def fetch_sheet_text_and_languages(sheet_input):
                 lang_c = row[2].strip()
                 if lang_c not in detected_languages:
                     detected_languages.append(lang_c)
-            break
+        
+        if "活動時差統一" in row_str or row_idx == 10:
+            if len(row) > 1 and row[1].strip():
+                target_timezone = row[1].strip()
 
     for sheet in doc.worksheets():
         records = sheet.get_all_values()
@@ -103,7 +117,7 @@ def fetch_sheet_text_and_languages(sheet_input):
             sheet_text = f"\n--- 分頁: {sheet.title} ---\n" + "\n".join(clean_rows)
             content_summary.append(sheet_text)
             
-    return doc.title, "\n".join(content_summary), detected_languages
+    return doc.title, "\n".join(content_summary), detected_languages, target_timezone
 
 def build_lang_url(base_url, lang_code):
     if "lang=" in base_url:
@@ -119,12 +133,7 @@ def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-gpu'
-                ]
+                args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled', '--disable-gpu']
             )
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
@@ -140,7 +149,6 @@ def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
                 pass
             page.screenshot(path=output_filename, full_page=True)
             browser.close()
-            
             if os.path.exists(output_filename) and os.path.getsize(output_filename) > 5000:
                 return output_filename
     except Exception:
@@ -175,10 +183,10 @@ def compress_image_to_base64(img_path, max_width=1000, quality=80):
         return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 def is_ai_refusal(text):
-    refusal_keywords = ["抱歉", "無法進行", "無法協助", "無法提供", "sorry", "cannot assist", "unable to process"]
+    refusal_keywords = ["抱歉", "無法進行", "無法協助", "無法提供", "sorry", "cannot assist", "unable to process", "as an ai"]
     return len(text) < 200 and any(kw in text.lower() for kw in refusal_keywords)
 
-def run_ai_qa(sheet_context, img_path, lang_name=""):
+def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"):
     base64_image = compress_image_to_base64(img_path)
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -189,28 +197,35 @@ def run_ai_qa(sheet_context, img_path, lang_name=""):
     
     candidate_models = [
         "google/gemini-2.0-flash-001",
+        "google/gemini-2.0-flash-lite-001",
         "google/gemini-flash-1.5",
         "openai/gpt-4o-mini"
     ]
 
+    tz_rule_info = TIMEZONE_RULES.get(target_timezone, {})
+    expected_start = tz_rule_info.get("start", "依企劃為主")
+    expected_end = tz_rule_info.get("end", "依企劃為主")
+
     prompt = f"""
-    你是一名極度嚴苛的資深 QA 測試工程師。請針對「圖片 Banner/網頁」與「企劃 Excel 資料」進行【逐字】嚴格比對（當前檢查語系：【{lang_name}】）。
+    你是一名極度嚴苛的資深 QA 測試工程師。請針對「圖片 Banner/網頁」與「企劃 Excel 資料」進行【字對字】嚴格比對（當前檢查語系：【{lang_name}】）。
 
-    【核心強制檢查步驟】：
-    1. 🔍 [Banner 時間與時區抄寫]：
-       - 請先從截圖 Banner 的黃色/白色時間標籤，【抄出】圖片上實際顯示的文字（例如：圖片顯示 "9/5 09:00 AM - 9/10 08:59 AM"）。
-    2. 📋 [Excel 時間與時區對照]：
-       - 從下方企劃資料中，找出規範的活動時間與時區（例如：企劃規定 "5 de setembro 01:00 AM (GMT-3)" 或 "9/5 01:00 AM"）。
-    3. ⚖️ [時間/時區對比判定]：
-       - 只要圖片上的「小時」、「AM/PM」或「時區」與企劃不完全一致（例如 09:00 AM vs 01:00 AM），【必須判定為 ❌ 異常】！
-    4. 🌐 [網頁翻譯與規則比對]：
-       - 比對活動規則、榜單金額與【{lang_name}】標題翻譯是否吻合。
+    【⏰ 時區與時間強制檢驗規則（重中之重）】：
+    1. 本企劃設定之【活動時差統一】：【{target_timezone}】。
+    2. 依據系統時區規範，【{target_timezone}】所對應之標準顯示時間必須為：
+       - 活動開始時間：【{expected_start}】
+       - 活動結束時間：【{expected_end}】
+    3. 🔍 [抄寫步驟]：請抄出圖片 Banner 黃色/白色標籤上顯示的時間文字（例如 "9/5 09:00 AM - 9/10 08:59 AM"）。
+    4. ⚖️ [判定步驟]：
+       - 如果企劃指定為【{target_timezone}】，但 Banner 上顯示的時間不是【{expected_start} - {expected_end}】（例如 Banner 顯示了 09:00 AM 但依據 {target_timezone} 應該顯示 {expected_start}），【必須判定為 ❌ 異常】！
 
-    【首行格式要求（請務必放在第一行）】：
+    【🌐 網頁翻譯與規則比對】：
+    - 比對活動規則說明、榜單金額與【{lang_name}】標題翻譯是否吻合。
+
+    【首行格式要求（必須放在第一行）】：
     - 若完全無誤：【判定結果】：✅ 通過
-    - 若有任何不符（含 Banner 時間不符）：【判定結果】：❌ 異常（必須寫出錯處，例如：Banner 時間顯示 09:00 AM 與企劃 01:00 AM (GMT-3) 不符）
+    - 若有任何不符（含 Banner 時間/時區不符）：【判定結果】：❌ 異常（必須寫出錯處，例如：Banner 時間顯示 09:00 AM，與時區 {target_timezone} 應顯示之 {expected_start} 不符）
 
-    【企劃檔案內容】：
+    【企劃規格內容】：
     {sheet_context}
     """
 
@@ -264,7 +279,6 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                 progress_bar = st.progress(0)
                 
                 for index, row in enumerate(rows):
-                    # 精準對齊圖片中的「活動名稱」、「活動文件網址」、「活動網頁網址」
                     campaign_name = get_smart_column_value(row, ["活動名稱", "活動", "名稱", "campaign"]) or f"活動_{index+1}"
                     sheet_url = get_smart_column_value(row, ["活動文件網址", "文件網址", "文件", "excel網址", "企劃網址", "試算表"])
                     web_url = get_smart_column_value(row, ["活動網頁網址", "網頁網址", "網頁", "測試網址", "連結", "url"])
@@ -278,13 +292,13 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                             continue
                             
                         try:
-                            st.write("📄 **[1/3]** 正在讀取 Google Sheet 企劃書內容...")
-                            doc_title, sheet_context, target_langs = fetch_sheet_text_and_languages(sheet_url)
+                            st.write("📄 **[1/3]** 正在讀取 Google Sheet 企劃書內容與時區規範...")
+                            doc_title, sheet_context, target_langs, target_timezone = fetch_sheet_text_and_languages(sheet_url)
                             
                             if not target_langs:
                                 target_langs = ["預設語系"]
                             
-                            st.write(f"🌐 **[2/3]** 檢測到目標對稿語系：`{', '.join(target_langs)}`")
+                            st.write(f"🌐 **[2/3]** 檢測語系：`{', '.join(target_langs)}` | 統一時區：`{target_timezone}`")
                             
                             overall_passed = True
                             summary_list = []
@@ -297,8 +311,8 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                                 img_filename = f"temp_{index}_{lang_name}.png"
                                 capture_webpage_safe(target_lang_url, img_filename)
                                 
-                                st.write(f"🤖 **[3/3]** Vision AI 正進行字對字嚴格比對（{lang_name}）...")
-                                report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name)
+                                st.write(f"🤖 **[3/3]** Vision AI 依據時區【{target_timezone}】規則嚴格比對中...")
+                                report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name, target_timezone=target_timezone)
                                 
                                 first_line = report.strip().split('\n')[0]
                                 if "❌" in first_line or "異常" in first_line or "不符" in first_line:
