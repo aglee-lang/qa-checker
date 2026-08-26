@@ -8,35 +8,23 @@ import json
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-from playwright.sync_api import sync_playwright
 from PIL import Image
 
-# 自動檢查並安裝 Playwright 瀏覽器環境
-try:
-    from playwright.sync_api import sync_playwright
-except ImportError:
-    os.system("playwright install chromium")
-
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
-st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (雲端記憶體優化版)")
+st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (終極防卡死版)")
 
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
 
 LANG_MAP = {
-    "葡文": "pt", "葡萄牙文": "pt",
-    "英文": "en", "英語": "en",
-    "簡中": "cn", "簡體中文": "cn",
-    "越文": "vi", "越南文": "vi", "越南語": "vi",
-    "泰文": "th", "泰語": "th",
-    "加祿文": "tl", "他加祿語": "tl", "菲律賓語": "tl",
-    "印地語": "hi", "印地文": "hi",
-    "印尼文": "id", "印尼語": "id",
-    "西文": "es", "西班牙文": "es"
+    "葡文": "pt", "葡萄牙文": "pt", "英文": "en", "英語": "en",
+    "簡中": "cn", "簡體中文": "cn", "越文": "vi", "越南文": "vi", "越南語": "vi",
+    "泰文": "th", "泰語": "th", "加祿文": "tl", "他加祿語": "tl", "菲律賓語": "tl",
+    "印地語": "hi", "印地文": "hi", "印尼文": "id", "印尼語": "id", "西文": "es", "西班牙文": "es"
 }
 
 st.sidebar.header("⚙️ 系統設定")
-st.sidebar.success("✅ 系統已順利連線運作 (付費通道)")
+st.sidebar.success("✅ 系統已順利連線運作 (獨立進程保護中)")
 
 mode = st.sidebar.radio("選擇對稿模式：", ["📂 批次自動對稿 (預設總控表)", "單一活動對稿"])
 
@@ -116,26 +104,48 @@ def build_lang_url(base_url, lang_code):
         return f"{base_url}?lang={lang_code}"
 
 def capture_webpage(target_url, output_filename="temp_screenshot.png"):
-    """防止 Linux Docker 共享記憶體吃滿崩潰的修復版本"""
-    os.system("playwright install chromium")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-setuid-sandbox"
-            ]
-        )
-        page = browser.new_page(viewport={"width": 1280, "height": 800})
-        try:
-            page.goto(target_url, timeout=25000, wait_until="domcontentloaded")
-            time.sleep(3)
-        except Exception:
-            pass
-        page.screenshot(path=output_filename, full_page=True)
-        browser.close()
+    """
+    終極防卡死：將截圖功能寫入獨立檔案並用 subprocess 呼叫。
+    若超過 35 秒未完成，系統將直接強制擊殺該進程，保證主程式永不卡死！
+    """
+    script_content = f"""
+import os
+import time
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    os.system("pip install playwright && playwright install chromium")
+    from playwright.sync_api import sync_playwright
+
+os.system("playwright install chromium")
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'])
+    page = browser.new_page(viewport={{"width": 1280, "height": 800}})
+    try:
+        # 強制 20 秒 Timeout，只等 DOM 載入
+        page.goto('{target_url}', timeout=20000, wait_until='domcontentloaded')
+        time.sleep(3)
+    except Exception as e:
+        print("Goto timeout, but forcing screenshot anyway...")
+    page.screenshot(path='{output_filename}', full_page=True)
+    browser.close()
+"""
+    with open("take_screenshot.py", "w", encoding="utf-8") as f:
+        f.write(script_content)
+
+    import subprocess
+    try:
+        # 啟動獨立進程，設定 35 秒強制死線
+        subprocess.run(["python", "take_screenshot.py"], timeout=35, check=True, capture_output=True)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("網頁載入卡死超時 (已強制阻斷)，請確認目標網頁是否可正常連線。")
+    except subprocess.CalledProcessError as e:
+        err_msg = e.stderr.decode('utf-8', errors='ignore')
+        raise RuntimeError(f"截圖系統發生異常: {err_msg}")
+    
+    if not os.path.exists(output_filename):
+        raise RuntimeError("未能成功產生截圖檔案。")
+
     return output_filename
 
 def compress_image_to_base64(img_path, max_width=1000, quality=80):
@@ -215,7 +225,7 @@ def run_ai_qa(sheet_context, img_path, lang_name=""):
             if "choices" in res_data and len(res_data["choices"]) > 0:
                 answer = res_data["choices"][0]["message"]["content"]
                 if is_ai_refusal(answer):
-                    err_logs.append(f"[{model_name}]: 觸發安全過濾拒絕回答")
+                    err_logs.append(f"[{model_name}]: 觸發過濾，切換模型")
                     continue
                 return answer, model_name
             else:
@@ -251,13 +261,13 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                         master_sheet.update_cell(row_number, 6, "❌ 跳過 (資料不完整)")
                         continue
                     try:
-                        with st.spinner("📄 正在連線 Google Sheet 讀取企劃書與語系..."):
+                        with st.spinner("📄 讀取企劃書語系中..."):
                             doc_title, sheet_context, target_langs = fetch_sheet_text_and_languages(sheet_url)
                         
                         if not target_langs:
                             target_langs = ["預設語系"]
                         
-                        st.write(f"🌐 精準鎖定已選語系：`{', '.join(target_langs)}`")
+                        st.write(f"🌐 目標檢查語系：`{', '.join(target_langs)}`")
                         
                         overall_passed = True
                         summary_list = []
@@ -269,10 +279,10 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                             st.markdown(f"#### 🌐 語系對稿：**{lang_name}** (`{target_lang_url}`)")
                             img_filename = f"temp_{index}_{lang_name}.png"
                             
-                            with st.spinner(f"📸 正在啟動無頭瀏覽器截圖 ({lang_name})..."):
+                            with st.spinner(f"📸 獨立進程安全截圖中 ({lang_name})..."):
                                 capture_webpage(target_lang_url, img_filename)
                                 
-                            with st.spinner(f"🤖 正在呼叫 Vision AI 進行『{lang_name}』字對字嚴格比對..."):
+                            with st.spinner(f"🤖 Vision AI 嚴格比對中 ({lang_name})..."):
                                 report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name)
                             
                             first_line = report.strip().split('\n')[0]
@@ -301,4 +311,4 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                             pass
                     progress_bar.progress((index + 1) / total_items)
         except Exception as e:
-            st.error(f"執行失敗：{e}")
+            st.error(f"執行總控失敗：{e}")
