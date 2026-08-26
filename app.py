@@ -25,7 +25,7 @@ LANG_MAP = {
 }
 
 st.sidebar.header("⚙️ 系統設定")
-st.sidebar.success("✅ 系統連線正常 (智慧欄位匹配中)")
+st.sidebar.success("✅ 系統連線正常 (完全對齊最新欄位名稱)")
 
 mode = st.sidebar.radio("選擇對稿模式：", ["📂 批次自動對稿 (預設總控表)", "單一活動對稿"])
 
@@ -53,7 +53,7 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 def get_smart_column_value(row_dict, target_keywords):
-    """智慧模糊搜尋總控表欄位，解決欄位標題空格或不同命名問題"""
+    """準確匹配總控表欄位標題"""
     for key, val in row_dict.items():
         clean_key = str(key).strip().replace(" ", "").lower()
         for kw in target_keywords:
@@ -264,10 +264,10 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                 progress_bar = st.progress(0)
                 
                 for index, row in enumerate(rows):
-                    # 智慧識別欄位值
+                    # 精準對齊圖片中的「活動名稱」、「活動文件網址」、「活動網頁網址」
                     campaign_name = get_smart_column_value(row, ["活動名稱", "活動", "名稱", "campaign"]) or f"活動_{index+1}"
-                    sheet_url = get_smart_column_value(row, ["excel", "企劃", "sheet", "試算表"])
-                    web_url = get_smart_column_value(row, ["網頁", "網址", "url", "測試網址", "連結"])
+                    sheet_url = get_smart_column_value(row, ["活動文件網址", "文件網址", "文件", "excel網址", "企劃網址", "試算表"])
+                    web_url = get_smart_column_value(row, ["活動網頁網址", "網頁網址", "網頁", "測試網址", "連結", "url"])
                     row_number = index + 2
                     
                     with st.status(f"🔄 正在處理 [{index+1}/{total_items}]：**{campaign_name}**", expanded=True) as status:
@@ -275,7 +275,6 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                             master_sheet.update_cell(row_number, 5, False)
                             master_sheet.update_cell(row_number, 6, "❌ 跳過 (網址未填寫完全)")
                             status.update(label=f"⚠️ 跳過 [{index+1}/{total_items}]：{campaign_name} (網址未填寫完全)", state="complete")
-                            st.warning(f"偵測欄位缺失：Excel網址='{sheet_url}', 網頁網址='{web_url}'")
                             continue
                             
                         try:
