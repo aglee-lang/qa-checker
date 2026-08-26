@@ -15,13 +15,26 @@ from PIL import Image
 os.system("playwright install chromium")
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
-st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統")
+st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (多語系支援)")
 
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
 
+# 全語系網址代碼對照表
+LANG_MAP = {
+    "葡文": "pt", "葡萄牙文": "pt",
+    "英文": "en", "英語": "en",
+    "簡中": "cn", "簡體中文": "cn",
+    "越文": "vi", "越南文": "vi", "越南語": "vi",
+    "泰文": "th", "泰語": "th",
+    "加祿文": "tl", "他加祿語": "tl", "菲律賓語": "tl",
+    "印地語": "hi", "印地文": "hi",
+    "印尼文": "id", "印尼語": "id",
+    "西文": "es", "西班牙文": "es"
+}
+
 st.sidebar.header("⚙️ 系統設定")
-st.sidebar.success("✅ 系統已順利連線運作 (付費通道)")
+st.sidebar.success("✅ 系統已順利連線運作 (付費多語系通道)")
 
 mode = st.sidebar.radio("選擇對稿模式：", ["📂 批次自動對稿 (預設總控表)", "單一活動對稿"])
 
@@ -31,7 +44,6 @@ def extract_sheet_id(url):
 
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    
     if "GCP_CREDENTIALS" in st.secrets:
         try:
             creds_dict = json.loads(st.secrets["GCP_CREDENTIALS"], strict=False)
@@ -47,10 +59,9 @@ def get_gspread_client():
             raise RuntimeError(f"解析 GCP 金鑰失敗: {e}")
     else:
         creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
-        
     return gspread.authorize(creds)
 
-def fetch_sheet_text(sheet_input):
+def fetch_sheet_text_and_languages(sheet_input):
     client = get_gspread_client()
     sheet_input = str(sheet_input).strip()
     try:
@@ -63,18 +74,36 @@ def fetch_sheet_text(sheet_input):
         raise RuntimeError(f"無法開啟企劃 Excel：{err}")
     
     content_summary = []
+    detected_languages = []
+    
     for sheet in doc.worksheets():
         records = sheet.get_all_values()
         clean_rows = []
-        for row in records[:40]:
+        for row_idx, row in enumerate(records[:40]):
             row_str = ", ".join([str(cell).strip() for cell in row if str(cell).strip()])
             if row_str:
                 clean_rows.append(row_str)
+            
+            # 自動偵測企劃書內出現的目標語系
+            for cell in row:
+                cell_clean = str(cell).strip()
+                if cell_clean in LANG_MAP and cell_clean not in detected_languages:
+                    detected_languages.append(cell_clean)
+                    
         if clean_rows:
             sheet_text = f"\n--- 分頁: {sheet.title} ---\n" + "\n".join(clean_rows)
             content_summary.append(sheet_text)
-    
-    return doc.title, "\n".join(content_summary)
+            
+    return doc.title, "\n".join(content_summary), detected_languages
+
+def build_lang_url(base_url, lang_code):
+    """將網址動態替換或加上目標語系參數 (例如 &lang=en)"""
+    if "lang=" in base_url:
+        return re.sub(r'lang=[a-zA-Z0-9-]+', f'lang={lang_code}', base_url)
+    elif "?" in base_url:
+        return f"{base_url}&lang={lang_code}"
+    else:
+        return f"{base_url}?lang={lang_code}"
 
 def capture_webpage(target_url, output_filename="temp_screenshot.png"):
     with sync_playwright() as p:
@@ -102,7 +131,7 @@ def is_ai_refusal(text):
     refusal_keywords = ["抱歉", "無法進行", "無法協助", "無法提供", "sorry", "cannot assist", "unable to process"]
     return len(text) < 200 and any(kw in text.lower() for kw in refusal_keywords)
 
-def run_ai_qa(sheet_context, img_path, lang_hint=""):
+def run_ai_qa(sheet_context, img_path, lang_name=""):
     base64_image = compress_image_to_base64(img_path)
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -118,11 +147,11 @@ def run_ai_qa(sheet_context, img_path, lang_hint=""):
     ]
 
     prompt = f"""
-    你是一名商業數位行銷內容的專案核對人員。請比對宣傳頁面截圖與企劃檔案（目標語系：{lang_hint}）：
+    你是一名商業數位行銷內容的專案核對人員。請比對此宣傳頁面截圖（當前檢查語系：【{lang_name}】）與企劃檔案內容：
 
     【對照比對重點】：
-    1. 🖼️ Banner 區塊：重點比對標題、活動時間與時區（例如 GMT-3 與 GMT+8）。若 Banner 時區或時間與企劃檔不一致，必須標註不符。
-    2. 🌐 網頁內文區塊：比對活動規則說明、獎項金額與文字翻譯是否與企劃檔案吻合。
+    1. 🖼️ Banner 區塊：比對標題/Slogan、活動時間與時區（例如 GMT-3 與 GMT+8），確認當前【{lang_name}】語系下的翻譯與時間無誤。
+    2. 🌐 網頁內文區塊：比對活動規則說明、榜單金額與【{lang_name}】單字翻譯是否與企劃檔案吻合。
 
     【首行格式要求（請務必放在第一行）】：
     - 若完全無誤：【判定結果】：✅ 通過
@@ -180,45 +209,58 @@ if mode == "📂 批次自動對稿 (預設總控表)":
             if rows:
                 total_items = len(rows)
                 progress_bar = st.progress(0)
-                all_reports = []
                 os.makedirs("reports", exist_ok=True)
                 for index, row in enumerate(rows):
                     campaign_name = row.get("活動名稱", f"活動_{index+1}")
                     sheet_url = row.get("Excel網址", "")
                     web_url = row.get("網頁網址", "")
-                    lang = row.get("語系", "")
                     row_number = index + 2
-                    st.markdown(f"--- \n### 🔄 正在處理 [{index+1}/{total_items}]：**{campaign_name}** ({lang})")
+                    
+                    st.markdown(f"--- \n### 🔄 正在處理 [{index+1}/{total_items}]：**{campaign_name}**")
                     if not sheet_url or not web_url:
                         master_sheet.update_cell(row_number, 5, False)
                         master_sheet.update_cell(row_number, 6, "❌ 跳過 (資料不完整)")
                         continue
                     try:
-                        doc_title, sheet_context = fetch_sheet_text(sheet_url)
-                        img_filename = f"temp_{index}.png"
-                        capture_webpage(web_url, img_filename)
-                        report, model_used = run_ai_qa(sheet_context, img_filename, lang_hint=lang)
+                        doc_title, sheet_context, target_langs = fetch_sheet_text_and_languages(sheet_url)
                         
-                        first_line = report.strip().split('\n')[0]
-                        if "【判定結果】" in first_line:
-                            short_summary = first_line.replace("【判定結果】：", "").replace("【判定結果】:", "").strip()
-                        elif "❌" in report or "異常" in report or "不符" in report:
-                            short_summary = "❌ 異常 (見報告)"
-                        elif "✅" in report or "通過" in report:
-                            short_summary = "✅ 通過"
-                        else:
-                            short_summary = "⚠️ 需人工檢核"
-
-                        master_sheet.update_cell(row_number, 5, True)
-                        master_sheet.update_cell(row_number, 6, short_summary)
+                        # 若企劃書內沒寫，預設至少檢查原本網址對應的語系
+                        if not target_langs:
+                            target_langs = ["預設語系"]
                         
-                        st.markdown(report)
+                        st.write(f"🌐 偵測到本活動需對稿之語系：`{', '.join(target_langs)}`")
                         
-                        # 📸 重新補回顯示網頁/Banner 截圖
-                        if os.path.exists(img_filename):
-                            st.image(img_filename, caption=f"📸 網頁與 Banner 截圖：{campaign_name}", use_container_width=True)
+                        overall_passed = True
+                        summary_list = []
+                        
+                        # 依序對各個語系進行網址切換、截圖與 AI QA
+                        for lang_name in target_langs:
+                            lang_code = LANG_MAP.get(lang_name, "")
+                            target_lang_url = build_lang_url(web_url, lang_code) if lang_code else web_url
                             
-                        time.sleep(2)
+                            st.markdown(f"#### 🌐 語系檢查：**{lang_name}** (`{target_lang_url}`)")
+                            img_filename = f"temp_{index}_{lang_name}.png"
+                            
+                            capture_webpage(target_lang_url, img_filename)
+                            report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name)
+                            
+                            first_line = report.strip().split('\n')[0]
+                            if "❌" in first_line or "異常" in first_line:
+                                overall_passed = False
+                                summary_list.append(f"❌ {lang_name}異常")
+                            else:
+                                summary_list.append(f"✅ {lang_name}通過")
+
+                            st.markdown(report)
+                            if os.path.exists(img_filename):
+                                st.image(img_filename, caption=f"📸 網頁截圖 ({lang_name})：{campaign_name}", use_container_width=True)
+                            time.sleep(2)
+
+                        # 回寫總控表判定總結
+                        final_summary = " | ".join(summary_list)
+                        master_sheet.update_cell(row_number, 5, overall_passed)
+                        master_sheet.update_cell(row_number, 6, final_summary)
+                        
                     except Exception as row_err:
                         err_msg = str(row_err)
                         st.error(f"❌ 處理失敗：{err_msg}")
