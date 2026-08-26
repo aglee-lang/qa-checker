@@ -21,7 +21,7 @@ OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "sk-or-v1-727fade79aa7
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
 
 st.sidebar.header("⚙️ 系統設定")
-st.sidebar.success("✅ 系統已順利連線運作")
+st.sidebar.success("✅ 系統已順利連線運作 (付費通道)")
 
 mode = st.sidebar.radio("選擇對稿模式：", ["📂 批次自動對稿 (預設總控表)", "單一活動對稿"])
 
@@ -66,7 +66,7 @@ def fetch_sheet_text(sheet_input):
     for sheet in doc.worksheets():
         records = sheet.get_all_values()
         clean_rows = []
-        for row in records[:25]:
+        for row in records[:40]:  # 增加讀取列數至 40 列，保留更多比對資訊
             row_str = ", ".join([str(cell).strip() for cell in row if str(cell).strip()])
             if row_str:
                 clean_rows.append(row_str)
@@ -74,11 +74,7 @@ def fetch_sheet_text(sheet_input):
             sheet_text = f"\n--- 分頁: {sheet.title} ---\n" + "\n".join(clean_rows)
             content_summary.append(sheet_text)
     
-    full_text = "\n".join(content_summary)
-    if len(full_text) > 3000:
-        full_text = full_text[:3000] + "\n...(企劃內容過長已自動精簡)..."
-        
-    return doc.title, full_text
+    return doc.title, "\n".join(content_summary)
 
 def capture_webpage(target_url, output_filename="temp_screenshot.png"):
     with sync_playwright() as p:
@@ -90,7 +86,8 @@ def capture_webpage(target_url, output_filename="temp_screenshot.png"):
         browser.close()
     return output_filename
 
-def compress_image_to_base64(img_path, max_width=1000, quality=75):
+def compress_image_to_base64(img_path, max_width=1000, quality=80):
+    # 恢復高畫質截圖傳送
     with Image.open(img_path) as img:
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
@@ -111,6 +108,7 @@ def run_ai_qa(sheet_context, img_path, lang_hint=""):
         "X-Title": "QA Checker"
     }
     
+    # 選用速度最快、精準度最高且付費管道極其穩定的 Vision 模型
     candidate_models = [
         "openai/gpt-4o-mini",
         "google/gemini-2.0-flash-001",
@@ -142,7 +140,7 @@ def run_ai_qa(sheet_context, img_path, lang_hint=""):
     for model_name in candidate_models:
         payload = {
             "model": model_name,
-            "max_tokens": 1000,
+            "max_tokens": 1200,  # 恢復至完整 1200 Tokens 輸出
             "messages": [
                 {
                     "role": "user",
@@ -157,23 +155,16 @@ def run_ai_qa(sheet_context, img_path, lang_hint=""):
             ]
         }
         
-        # 加入 2 次自動重試機制，應對 API 併發鎖定
-        for attempt in range(2):
-            try:
-                res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=45)
-                res_data = res.json()
-                if "choices" in res_data and len(res_data["choices"]) > 0:
-                    return res_data["choices"][0]["message"]["content"], model_name
-                else:
-                    msg = res_data.get("error", {}).get("message", str(res_data))
-                    if "in-flight" in msg.lower() or "rate" in msg.lower():
-                        time.sleep(5)  # 遇到併發鎖定，先冷卻 5 秒再重試
-                        continue
-                    err_logs.append(f"[{model_name}]: {msg}")
-                    break
-            except Exception as e:
-                err_logs.append(f"[{model_name}]: {e}")
-                time.sleep(3)
+        try:
+            res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=45)
+            res_data = res.json()
+            if "choices" in res_data and len(res_data["choices"]) > 0:
+                return res_data["choices"][0]["message"]["content"], model_name
+            else:
+                msg = res_data.get("error", {}).get("message", str(res_data))
+                err_logs.append(f"[{model_name}]: {msg}")
+        except Exception as e:
+            err_logs.append(f"[{model_name}]: {e}")
 
     raise RuntimeError(" | ".join(err_logs))
 
@@ -222,18 +213,13 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                         master_sheet.update_cell(row_number, 6, short_summary)
                         
                         st.markdown(report)
-                        
-                        # 批次冷卻間隔拉長至 8 秒
-                        time.sleep(8)
+                        time.sleep(2)  # 縮短冷卻時間至 2 秒
                     except Exception as row_err:
                         err_msg = str(row_err)
                         st.error(f"❌ 處理失敗：{err_msg}")
                         try:
                             master_sheet.update_cell(row_number, 5, False)
-                            if "tokens limit" in err_msg.lower() or "credits" in err_msg.lower():
-                                master_sheet.update_cell(row_number, 6, "❌ 失敗 (Token/額度不足)")
-                            else:
-                                master_sheet.update_cell(row_number, 6, "❌ 失敗 (API呼叫失敗)")
+                            master_sheet.update_cell(row_number, 6, f"❌ 失敗：{err_msg[:30]}")
                         except Exception:
                             pass
                     progress_bar.progress((index + 1) / total_items)
