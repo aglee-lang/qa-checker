@@ -35,8 +35,6 @@ def get_gspread_client():
     if "GCP_CREDENTIALS" in st.secrets:
         try:
             creds_dict = json.loads(st.secrets["GCP_CREDENTIALS"], strict=False)
-            
-            # 【關鍵自動修復】：替換 \n 換行符號並自動補全丟失的 END 標籤
             if "private_key" in creds_dict:
                 pk = creds_dict["private_key"].replace('\\n', '\n')
                 if "-----END PRIVATE KEY-----" not in pk:
@@ -44,7 +42,6 @@ def get_gspread_client():
                         pk += '\n'
                     pk += "-----END PRIVATE KEY-----\n"
                 creds_dict["private_key"] = pk
-
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         except Exception as e:
             raise RuntimeError(f"解析 GCP 金鑰失敗: {e}")
@@ -96,8 +93,21 @@ def compress_image_to_base64(img_path, max_width=1000, quality=75):
 
 def run_ai_qa(sheet_context, img_path, lang_hint=""):
     base64_image = compress_image_to_base64(img_path)
-    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
-    candidate_models = ["google/gemini-2.0-flash-exp:free", "meta-llama/llama-3.2-11b-vision-instruct:free", "google/gemini-2.0-flash-001", "google/gemini-flash-1.5"]
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://streamlit.io",
+        "X-Title": "QA Checker"
+    }
+    
+    # 多模型輪替策略
+    candidate_models = [
+        "google/gemini-2.0-flash-exp:free",
+        "meta-llama/llama-3.2-11b-vision-instruct:free",
+        "google/gemini-flash-1.5-8b",
+        "google/gemini-2.0-flash-001",
+        "google/gemini-flash-1.5"
+    ]
 
     prompt = f"""
     你是一名專業的資深 QA 測試工程師。
@@ -107,16 +117,36 @@ def run_ai_qa(sheet_context, img_path, lang_hint=""):
     【Excel 企劃資料】：{sheet_context}
     """
 
+    err_logs = []
     for model_name in candidate_models:
-        payload = {"model": model_name, "max_tokens": 1200, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}]}
+        payload = {
+            "model": model_name,
+            "max_tokens": 1200,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                        }
+                    ]
+                }
+            ]
+        }
         try:
             res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=45)
             res_data = res.json()
             if "choices" in res_data and len(res_data["choices"]) > 0:
                 return res_data["choices"][0]["message"]["content"], model_name
-        except Exception:
-            pass
-    raise RuntimeError("OpenRouter 所有 AI 模型呼叫失敗。")
+            else:
+                msg = res_data.get("error", {}).get("message", str(res_data))
+                err_logs.append(f"[{model_name}]: {msg}")
+        except Exception as e:
+            err_logs.append(f"[{model_name}]: {e}")
+
+    raise RuntimeError(" | ".join(err_logs))
 
 if mode == "📂 批次自動對稿 (預設總控表)":
     st.subheader("📂 批次全自動對稿模式")
@@ -147,7 +177,6 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                         img_filename = f"temp_{index}.png"
                         capture_webpage(web_url, img_filename)
                         report, model_used = run_ai_qa(sheet_context, img_filename, lang_hint=lang)
-                        safe_filename = re.sub(r'[\\/*?:"<>|]', "", f"{campaign_name}_{lang}")
                         
                         first_line = report.strip().split('\n')[0]
                         short_summary = first_line.replace("【判定結果】：", "").replace("【判定結果】:", "").strip()
@@ -155,7 +184,7 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                         master_sheet.update_cell(row_number, 6, short_summary if short_summary else "✅ 完成")
                         
                         st.markdown(report)
-                        time.sleep(2)
+                        time.sleep(3)
                     except Exception as row_err:
                         st.error(f"❌ 處理失敗：{row_err}")
                     progress_bar.progress((index + 1) / total_items)
