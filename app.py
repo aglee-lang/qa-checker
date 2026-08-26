@@ -34,8 +34,17 @@ def get_gspread_client():
     
     if "GCP_CREDENTIALS" in st.secrets:
         try:
-            # 加入 strict=False 允許解析包含控制字元/換行符號的私鑰
             creds_dict = json.loads(st.secrets["GCP_CREDENTIALS"], strict=False)
+            
+            # 【關鍵自動修復】：替換 \n 換行符號並自動補全丟失的 END 標籤
+            if "private_key" in creds_dict:
+                pk = creds_dict["private_key"].replace('\\n', '\n')
+                if "-----END PRIVATE KEY-----" not in pk:
+                    if not pk.endswith('\n'):
+                        pk += '\n'
+                    pk += "-----END PRIVATE KEY-----\n"
+                creds_dict["private_key"] = pk
+
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         except Exception as e:
             raise RuntimeError(f"解析 GCP 金鑰失敗: {e}")
