@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 from PIL import Image
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
-st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (抗幻覺強化版)")
+st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (動態渲染優化版)")
 
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
@@ -34,7 +34,7 @@ TIMEZONE_RULES = {
 }
 
 st.sidebar.header("⚙️ 系統設定")
-st.sidebar.success("✅ 系統連線正常 (防 OCR 幻覺比對生效中)")
+st.sidebar.success("✅ 系統連線正常 (動態懶加載渲染中)")
 
 mode = st.sidebar.radio("選擇對稿模式：", ["📂 批次自動對稿 (預設總控表)", "單一活動對稿"])
 
@@ -126,23 +126,31 @@ def build_lang_url(base_url, lang_code):
         return f"{base_url}?lang={lang_code}"
 
 def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
+    """防止黑屏修復版：DOM 加載後倒數 6 秒 + 微幅滾動觸發懶加載"""
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled', '--disable-gpu']
+                args=[
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-gpu'
+                ]
             )
             context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
+                viewport={"width": 1280, "height": 900},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 bypass_csp=True,
                 ignore_https_errors=True
             )
             page = context.new_page()
             try:
-                page.goto(target_url, timeout=10000, wait_until='commit')
-                page.wait_for_timeout(3000)
+                page.goto(target_url, timeout=15000, wait_until='domcontentloaded')
+                page.wait_for_timeout(6000)  # 穩定等待 6 秒讓 SPA 圖片渲染
+                page.mouse.wheel(0, 300)     # 模擬滾動頁面觸發圖片 Lazy Load
+                page.wait_for_timeout(1000)
             except Exception:
                 pass
             page.screenshot(path=output_filename, full_page=True)
@@ -204,7 +212,6 @@ def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"
     expected_start = tz_rule_info.get("start", "")
     expected_end = tz_rule_info.get("end", "")
 
-    # 抗幻覺核心驗證 Prompt
     prompt = f"""
     你是一名商業數位行銷內容的專案核對人員。請比對宣傳頁面截圖（目標語系：【{lang_name}】）與企劃規格檔案：
 
