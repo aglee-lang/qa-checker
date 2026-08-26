@@ -31,9 +31,11 @@ def extract_sheet_id(url):
 
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    # 優先讀取雲端 Secrets，本地則讀取 credentials.json
     if "gcp_service_account" in st.secrets:
         creds_dict = dict(st.secrets["gcp_service_account"])
+        # 自動校正與修復 PEM 金鑰換行格式
+        if "private_key" in creds_dict:
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     else:
         creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
@@ -134,7 +136,6 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                         capture_webpage(web_url, img_filename)
                         report, model_used = run_ai_qa(sheet_context, img_filename, lang_hint=lang)
                         safe_filename = re.sub(r'[\\/*?:"<>|]', "", f"{campaign_name}_{lang}")
-                        single_report_text = f"活動名稱：{campaign_name} ({lang})\n網頁網址：{web_url}\n使用模型：{model_used}\n\n{report}"
                         
                         first_line = report.strip().split('\n')[0]
                         short_summary = first_line.replace("【判定結果】：", "").replace("【判定結果】:", "").strip()
