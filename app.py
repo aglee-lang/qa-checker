@@ -11,16 +11,18 @@ from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 from PIL import Image
 
-# 自動安裝與準備 Playwright 瀏覽器
-os.system("playwright install chromium")
+# 自動檢查並安裝 Playwright 瀏覽器環境
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    os.system("playwright install chromium")
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
-st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (防卡死穩定版)")
+st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (雲端記憶體優化版)")
 
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
 
-# 全語系網址代碼對照表
 LANG_MAP = {
     "葡文": "pt", "葡萄牙文": "pt",
     "英文": "en", "英語": "en",
@@ -71,7 +73,7 @@ def fetch_sheet_text_and_languages(sheet_input):
         else:
             doc = client.open(sheet_input)
     except Exception as err:
-        raise RuntimeError(f"無法開啟企劃 Excel（請確認權限已釋出）：{err}")
+        raise RuntimeError(f"無法開啟企劃 Excel：{err}")
     
     content_summary = []
     detected_languages = []
@@ -114,16 +116,24 @@ def build_lang_url(base_url, lang_code):
         return f"{base_url}?lang={lang_code}"
 
 def capture_webpage(target_url, output_filename="temp_screenshot.png"):
-    """防卡死超時保護截圖邏輯"""
+    """防止 Linux Docker 共享記憶體吃滿崩潰的修復版本"""
+    os.system("playwright install chromium")
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-setuid-sandbox"
+            ]
+        )
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
         try:
-            # 20秒超時限制，且僅等待 DOM 加載，不等待無窮無盡的網路封包
-            page.goto(target_url, timeout=20000, wait_until="domcontentloaded")
-            time.sleep(3)  # 穩定等待 3 秒讓渲染完成
+            page.goto(target_url, timeout=25000, wait_until="domcontentloaded")
+            time.sleep(3)
         except Exception:
-            pass  # 就算網頁連線較慢，依然強行截取當前畫面
+            pass
         page.screenshot(path=output_filename, full_page=True)
         browser.close()
     return output_filename
@@ -205,7 +215,7 @@ def run_ai_qa(sheet_context, img_path, lang_name=""):
             if "choices" in res_data and len(res_data["choices"]) > 0:
                 answer = res_data["choices"][0]["message"]["content"]
                 if is_ai_refusal(answer):
-                    err_logs.append(f"[{model_name}]: 觸發安全過濾拒絕回答，自動切換備用模型")
+                    err_logs.append(f"[{model_name}]: 觸發安全過濾拒絕回答")
                     continue
                 return answer, model_name
             else:
@@ -241,7 +251,8 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                         master_sheet.update_cell(row_number, 6, "❌ 跳過 (資料不完整)")
                         continue
                     try:
-                        doc_title, sheet_context, target_langs = fetch_sheet_text_and_languages(sheet_url)
+                        with st.spinner("📄 正在連線 Google Sheet 讀取企劃書與語系..."):
+                            doc_title, sheet_context, target_langs = fetch_sheet_text_and_languages(sheet_url)
                         
                         if not target_langs:
                             target_langs = ["預設語系"]
@@ -258,8 +269,11 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                             st.markdown(f"#### 🌐 語系對稿：**{lang_name}** (`{target_lang_url}`)")
                             img_filename = f"temp_{index}_{lang_name}.png"
                             
-                            capture_webpage(target_lang_url, img_filename)
-                            report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name)
+                            with st.spinner(f"📸 正在啟動無頭瀏覽器截圖 ({lang_name})..."):
+                                capture_webpage(target_lang_url, img_filename)
+                                
+                            with st.spinner(f"🤖 正在呼叫 Vision AI 進行『{lang_name}』字對字嚴格比對..."):
+                                report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name)
                             
                             first_line = report.strip().split('\n')[0]
                             if "❌" in first_line or "異常" in first_line or "不符" in first_line:
