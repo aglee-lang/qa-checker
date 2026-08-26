@@ -5,13 +5,14 @@ import time
 import base64
 import requests
 import json
+import urllib.parse
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 from PIL import Image
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
-st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (輕量穩定版)")
+st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (反防爬抗卡死版)")
 
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
@@ -103,26 +104,58 @@ def build_lang_url(base_url, lang_code):
     else:
         return f"{base_url}?lang={lang_code}"
 
-def capture_webpage(target_url, output_filename="temp_screenshot.png"):
-    """安全截圖邏輯：加入 Playwright 超時與異常捕捉保護"""
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-        )
-        context = browser.new_context(viewport={"width": 1280, "height": 800})
-        page = context.new_page()
-        try:
-            # 15 秒硬性 Timeout，只要 DOM 加載完成就截圖，絕不無休止等待網路請求
-            page.goto(target_url, timeout=15000, wait_until='domcontentloaded')
-            time.sleep(2)
-        except Exception as e:
-            st.warning(f"⚠️ 網頁載入時間較長，已強行抓取畫面 ({e})")
-        
-        page.screenshot(path=output_filename, full_page=True)
-        browser.close()
-    return output_filename
+def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
+    """使用真實 User-Agent 偽裝 + 雲端 API 備援防護截圖"""
+    # 嘗試方案 1：Playwright + 真實瀏覽器標頭偽裝
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-gpu'
+                ]
+            )
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                bypass_csp=True,
+                ignore_https_errors=True
+            )
+            page = context.new_page()
+            # 強制 10 秒即刻響應，commit 即開始計時 3 秒完成拍照
+            try:
+                page.goto(target_url, timeout=10000, wait_until='commit')
+                page.wait_for_timeout(3000)
+            except Exception:
+                pass
+            page.screenshot(path=output_filename, full_page=True)
+            browser.close()
+            
+            if os.path.exists(output_filename) and os.path.getsize(output_filename) > 5000:
+                return output_filename
+    except Exception as local_err:
+        pass
+
+    # 嘗試方案 2 (備援)：若本地截圖被 WAF 擋下，切換至雲端 API 抓取圖片
+    try:
+        encoded_url = urllib.parse.quote(target_url, safe='')
+        api_url = f"https://api.microlink.io/?url={encoded_url}&screenshot=true&meta=false"
+        res = requests.get(api_url, timeout=20)
+        res_data = res.json()
+        if res_data.get("status") == "success":
+            img_url = res_data["data"]["screenshot"]["url"]
+            img_bytes = requests.get(img_url, timeout=20).content
+            with open(output_filename, "wb") as f:
+                f.write(img_bytes)
+            return output_filename
+    except Exception:
+        pass
+
+    raise RuntimeError("無法存取目標網頁截圖 (請確認網址是否可正常連線)")
 
 def compress_image_to_base64(img_path, max_width=1000, quality=80):
     with Image.open(img_path) as img:
@@ -231,63 +264,65 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                     web_url = row.get("網頁網址", "")
                     row_number = index + 2
                     
-                    st.markdown(f"--- \n### 🔄 正在處理 [{index+1}/{total_items}]：**{campaign_name}**")
-                    
-                    if not sheet_url or not web_url:
-                        master_sheet.update_cell(row_number, 5, False)
-                        master_sheet.update_cell(row_number, 6, "❌ 跳過 (資料不完整)")
-                        continue
-                        
-                    try:
-                        st.info("Step 1: 正在連結企劃檔讀取語言規格...")
-                        doc_title, sheet_context, target_langs = fetch_sheet_text_and_languages(sheet_url)
-                        
-                        if not target_langs:
-                            target_langs = ["預設語系"]
-                        
-                        st.write(f"🌐 判定需檢查語系：`{', '.join(target_langs)}`")
-                        
-                        overall_passed = True
-                        summary_list = []
-                        
-                        for lang_name in target_langs:
-                            lang_code = LANG_MAP.get(lang_name, "")
-                            target_lang_url = build_lang_url(web_url, lang_code) if lang_code else web_url
-                            
-                            st.markdown(f"#### 🌐 語系檢查中：**{lang_name}** (`{target_lang_url}`)")
-                            img_filename = f"temp_{index}_{lang_name}.png"
-                            
-                            st.info(f"Step 2: 正在開啟網頁並擷取截圖 [{lang_name}]...")
-                            capture_webpage(target_lang_url, img_filename)
-                            
-                            st.info(f"Step 3: AI 視覺模型正在比對內容 [{lang_name}]...")
-                            report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name)
-                            
-                            first_line = report.strip().split('\n')[0]
-                            if "❌" in first_line or "異常" in first_line or "不符" in first_line:
-                                overall_passed = False
-                                summary_list.append(f"❌ {lang_name}異常")
-                            else:
-                                summary_list.append(f"✅ {lang_name}通過")
-
-                            st.markdown(report)
-                            if os.path.exists(img_filename):
-                                st.image(img_filename, caption=f"📸 網頁截圖 ({lang_name})：{campaign_name}", use_container_width=True)
-                            time.sleep(2)
-
-                        final_summary = " | ".join(summary_list)
-                        master_sheet.update_cell(row_number, 5, overall_passed)
-                        master_sheet.update_cell(row_number, 6, final_summary)
-                        
-                    except Exception as row_err:
-                        err_msg = str(row_err)
-                        st.error(f"❌ 本項目處理失敗：{err_msg}")
-                        try:
+                    # 使用 Streamlit 實時狀態卡片（即時渲染畫面，拒絕卡死）
+                    with st.status(f"🔄 正在處理 [{index+1}/{total_items}]：**{campaign_name}**", expanded=True) as status:
+                        if not sheet_url or not web_url:
                             master_sheet.update_cell(row_number, 5, False)
-                            master_sheet.update_cell(row_number, 6, f"❌ 失敗：{err_msg[:30]}")
-                        except Exception:
-                            pass
-                    
+                            master_sheet.update_cell(row_number, 6, "❌ 跳過 (資料不完整)")
+                            status.update(label=f"⚠️ 跳過 [{index+1}/{total_items}]：{campaign_name} (資料不完整)", state="complete")
+                            continue
+                            
+                        try:
+                            st.write("📄 **[1/3]** 正在讀取 Google Sheet 企劃書內容...")
+                            doc_title, sheet_context, target_langs = fetch_sheet_text_and_languages(sheet_url)
+                            
+                            if not target_langs:
+                                target_langs = ["預設語系"]
+                            
+                            st.write(f"🌐 **[2/3]** 檢測到目標對稿語系：`{', '.join(target_langs)}`")
+                            
+                            overall_passed = True
+                            summary_list = []
+                            
+                            for lang_name in target_langs:
+                                lang_code = LANG_MAP.get(lang_name, "")
+                                target_lang_url = build_lang_url(web_url, lang_code) if lang_code else web_url
+                                
+                                st.write(f"📸 正在抓取網頁截圖（{lang_name}）：`{target_lang_url}`")
+                                img_filename = f"temp_{index}_{lang_name}.png"
+                                capture_webpage_safe(target_lang_url, img_filename)
+                                
+                                st.write(f"🤖 **[3/3]** Vision AI 正進行字對字嚴格比對（{lang_name}）...")
+                                report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name)
+                                
+                                first_line = report.strip().split('\n')[0]
+                                if "❌" in first_line or "異常" in first_line or "不符" in first_line:
+                                    overall_passed = False
+                                    summary_list.append(f"❌ {lang_name}異常")
+                                else:
+                                    summary_list.append(f"✅ {lang_name}通過")
+
+                                st.markdown(report)
+                                if os.path.exists(img_filename):
+                                    st.image(img_filename, caption=f"📸 網頁截圖 ({lang_name})：{campaign_name}", use_container_width=True)
+                                time.sleep(1)
+
+                            final_summary = " | ".join(summary_list)
+                            master_sheet.update_cell(row_number, 5, overall_passed)
+                            master_sheet.update_cell(row_number, 6, final_summary)
+                            
+                            status.update(label=f"✅ 完成 [{index+1}/{total_items}]：{campaign_name} ({final_summary})", state="complete")
+                            
+                        except Exception as row_err:
+                            err_msg = str(row_err)
+                            st.error(f"❌ 處理失敗：{err_msg}")
+                            try:
+                                master_sheet.update_cell(row_number, 5, False)
+                                master_sheet.update_cell(row_number, 6, f"❌ 失敗：{err_msg[:30]}")
+                            except Exception:
+                                pass
+                            status.update(label=f"❌ 異常 [{index+1}/{total_items}]：{campaign_name}", state="error")
+                            
                     progress_bar.progress((index + 1) / total_items)
         except Exception as e:
-            st.error(f"執行總控失敗：{e}")
+            st.error(f"執行失敗：{e}")
