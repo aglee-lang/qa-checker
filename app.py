@@ -15,7 +15,7 @@ from PIL import Image
 os.system("playwright install chromium")
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
-st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (多語系支援)")
+st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (精準語系比對)")
 
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
@@ -76,20 +76,33 @@ def fetch_sheet_text_and_languages(sheet_input):
     content_summary = []
     detected_languages = []
     
+    # 核心修復：精準抓取第一個工作表中的「主語系(B欄)」與「附/次要語系(C欄)」
+    first_sheet = doc.worksheets()[0]
+    records_first = first_sheet.get_all_values()
+    
+    for row_idx, row in enumerate(records_first[:20]):
+        row_str = "".join(row)
+        if "預設語言" in row_str or "次要語言" in row_str or row_idx == 9:
+            # 讀取 B 欄 (Index 1) 主語系
+            if len(row) > 1 and row[1].strip() in LANG_MAP:
+                lang_b = row[1].strip()
+                if lang_b not in detected_languages:
+                    detected_languages.append(lang_b)
+            # 讀取 C 欄 (Index 2) 附語系
+            if len(row) > 2 and row[2].strip() in LANG_MAP:
+                lang_c = row[2].strip()
+                if lang_c not in detected_languages:
+                    detected_languages.append(lang_c)
+            break
+
+    # 讀取全文內容供 AI 對照
     for sheet in doc.worksheets():
         records = sheet.get_all_values()
         clean_rows = []
-        for row_idx, row in enumerate(records[:40]):
+        for row in records[:40]:
             row_str = ", ".join([str(cell).strip() for cell in row if str(cell).strip()])
             if row_str:
                 clean_rows.append(row_str)
-            
-            # 自動偵測企劃書內出現的目標語系
-            for cell in row:
-                cell_clean = str(cell).strip()
-                if cell_clean in LANG_MAP and cell_clean not in detected_languages:
-                    detected_languages.append(cell_clean)
-                    
         if clean_rows:
             sheet_text = f"\n--- 分頁: {sheet.title} ---\n" + "\n".join(clean_rows)
             content_summary.append(sheet_text)
@@ -97,7 +110,6 @@ def fetch_sheet_text_and_languages(sheet_input):
     return doc.title, "\n".join(content_summary), detected_languages
 
 def build_lang_url(base_url, lang_code):
-    """將網址動態替換或加上目標語系參數 (例如 &lang=en)"""
     if "lang=" in base_url:
         return re.sub(r'lang=[a-zA-Z0-9-]+', f'lang={lang_code}', base_url)
     elif "?" in base_url:
@@ -147,15 +159,21 @@ def run_ai_qa(sheet_context, img_path, lang_name=""):
     ]
 
     prompt = f"""
-    你是一名商業數位行銷內容的專案核對人員。請比對此宣傳頁面截圖（當前檢查語系：【{lang_name}】）與企劃檔案內容：
+    你是一名極度嚴苛的資深 QA 測試工程師。請針對「圖片 Banner/網頁」與「企劃 Excel 資料」進行【逐字】嚴格比對（當前檢查語系：【{lang_name}】）。
 
-    【對照比對重點】：
-    1. 🖼️ Banner 區塊：比對標題/Slogan、活動時間與時區（例如 GMT-3 與 GMT+8），確認當前【{lang_name}】語系下的翻譯與時間無誤。
-    2. 🌐 網頁內文區塊：比對活動規則說明、榜單金額與【{lang_name}】單字翻譯是否與企劃檔案吻合。
+    【核心強制檢查步驟】：
+    1. 🔍 [Banner 時間與時區抄寫]：
+       - 請先從截圖 Banner 的黃色/白色時間標籤，【抄出】圖片上實際顯示的文字（例如：圖片顯示 "9/5 09:00 AM - 9/10 08:59 AM"）。
+    2. 📋 [Excel 時間與時區對照]：
+       - 從下方企劃資料中，找出規範的活動時間與時區（例如：企劃規定 "5 de setembro 01:00 AM (GMT-3)" 或 "9/5 01:00 AM"）。
+    3. ⚖️ [時間/時區對比判定]：
+       - 只要圖片上的「小時」、「AM/PM」或「時區」與企劃不完全一致（例如 09:00 AM vs 01:00 AM），【必須判定為 ❌ 異常】！
+    4. 🌐 [網頁翻譯與規則比對]：
+       - 比對活動規則、榜單金額與【{lang_name}】標題翻譯是否吻合。
 
     【首行格式要求（請務必放在第一行）】：
     - 若完全無誤：【判定結果】：✅ 通過
-    - 若有任何不符：【判定結果】：❌ 異常（簡短指出錯處）
+    - 若有任何不符（含 Banner 時間不符）：【判定結果】：❌ 異常（必須寫出錯處，例如：Banner 時間顯示 09:00 AM 與企劃 01:00 AM (GMT-3) 不符）
 
     【企劃檔案內容】：
     {sheet_context}
@@ -224,28 +242,26 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                     try:
                         doc_title, sheet_context, target_langs = fetch_sheet_text_and_languages(sheet_url)
                         
-                        # 若企劃書內沒寫，預設至少檢查原本網址對應的語系
                         if not target_langs:
                             target_langs = ["預設語系"]
                         
-                        st.write(f"🌐 偵測到本活動需對稿之語系：`{', '.join(target_langs)}`")
+                        st.write(f"🌐 精準鎖定已選語系：`{', '.join(target_langs)}`")
                         
                         overall_passed = True
                         summary_list = []
                         
-                        # 依序對各個語系進行網址切換、截圖與 AI QA
                         for lang_name in target_langs:
                             lang_code = LANG_MAP.get(lang_name, "")
                             target_lang_url = build_lang_url(web_url, lang_code) if lang_code else web_url
                             
-                            st.markdown(f"#### 🌐 語系檢查：**{lang_name}** (`{target_lang_url}`)")
+                            st.markdown(f"#### 🌐 語系對稿：**{lang_name}** (`{target_lang_url}`)")
                             img_filename = f"temp_{index}_{lang_name}.png"
                             
                             capture_webpage(target_lang_url, img_filename)
                             report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name)
                             
                             first_line = report.strip().split('\n')[0]
-                            if "❌" in first_line or "異常" in first_line:
+                            if "❌" in first_line or "異常" in first_line or "不符" in first_line:
                                 overall_passed = False
                                 summary_list.append(f"❌ {lang_name}異常")
                             else:
@@ -256,7 +272,6 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                                 st.image(img_filename, caption=f"📸 網頁截圖 ({lang_name})：{campaign_name}", use_container_width=True)
                             time.sleep(2)
 
-                        # 回寫總控表判定總結
                         final_summary = " | ".join(summary_list)
                         master_sheet.update_cell(row_number, 5, overall_passed)
                         master_sheet.update_cell(row_number, 6, final_summary)
