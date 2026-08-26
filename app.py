@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 from PIL import Image
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
-st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (反防爬抗卡死版)")
+st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統")
 
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
@@ -25,7 +25,7 @@ LANG_MAP = {
 }
 
 st.sidebar.header("⚙️ 系統設定")
-st.sidebar.success("✅ 系統已順利連線運作")
+st.sidebar.success("✅ 系統連線正常 (智慧欄位匹配中)")
 
 mode = st.sidebar.radio("選擇對稿模式：", ["📂 批次自動對稿 (預設總控表)", "單一活動對稿"])
 
@@ -51,6 +51,15 @@ def get_gspread_client():
     else:
         creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
     return gspread.authorize(creds)
+
+def get_smart_column_value(row_dict, target_keywords):
+    """智慧模糊搜尋總控表欄位，解決欄位標題空格或不同命名問題"""
+    for key, val in row_dict.items():
+        clean_key = str(key).strip().replace(" ", "").lower()
+        for kw in target_keywords:
+            if kw.lower() in clean_key and str(val).strip():
+                return str(val).strip()
+    return ""
 
 def fetch_sheet_text_and_languages(sheet_input):
     client = get_gspread_client()
@@ -105,8 +114,6 @@ def build_lang_url(base_url, lang_code):
         return f"{base_url}?lang={lang_code}"
 
 def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
-    """使用真實 User-Agent 偽裝 + 雲端 API 備援防護截圖"""
-    # 嘗試方案 1：Playwright + 真實瀏覽器標頭偽裝
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -126,7 +133,6 @@ def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
                 ignore_https_errors=True
             )
             page = context.new_page()
-            # 強制 10 秒即刻響應，commit 即開始計時 3 秒完成拍照
             try:
                 page.goto(target_url, timeout=10000, wait_until='commit')
                 page.wait_for_timeout(3000)
@@ -137,10 +143,9 @@ def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
             
             if os.path.exists(output_filename) and os.path.getsize(output_filename) > 5000:
                 return output_filename
-    except Exception as local_err:
+    except Exception:
         pass
 
-    # 嘗試方案 2 (備援)：若本地截圖被 WAF 擋下，切換至雲端 API 抓取圖片
     try:
         encoded_url = urllib.parse.quote(target_url, safe='')
         api_url = f"https://api.microlink.io/?url={encoded_url}&screenshot=true&meta=false"
@@ -259,17 +264,18 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                 progress_bar = st.progress(0)
                 
                 for index, row in enumerate(rows):
-                    campaign_name = row.get("活動名稱", f"活動_{index+1}")
-                    sheet_url = row.get("Excel網址", "")
-                    web_url = row.get("網頁網址", "")
+                    # 智慧識別欄位值
+                    campaign_name = get_smart_column_value(row, ["活動名稱", "活動", "名稱", "campaign"]) or f"活動_{index+1}"
+                    sheet_url = get_smart_column_value(row, ["excel", "企劃", "sheet", "試算表"])
+                    web_url = get_smart_column_value(row, ["網頁", "網址", "url", "測試網址", "連結"])
                     row_number = index + 2
                     
-                    # 使用 Streamlit 實時狀態卡片（即時渲染畫面，拒絕卡死）
                     with st.status(f"🔄 正在處理 [{index+1}/{total_items}]：**{campaign_name}**", expanded=True) as status:
                         if not sheet_url or not web_url:
                             master_sheet.update_cell(row_number, 5, False)
-                            master_sheet.update_cell(row_number, 6, "❌ 跳過 (資料不完整)")
-                            status.update(label=f"⚠️ 跳過 [{index+1}/{total_items}]：{campaign_name} (資料不完整)", state="complete")
+                            master_sheet.update_cell(row_number, 6, "❌ 跳過 (網址未填寫完全)")
+                            status.update(label=f"⚠️ 跳過 [{index+1}/{total_items}]：{campaign_name} (網址未填寫完全)", state="complete")
+                            st.warning(f"偵測欄位缺失：Excel網址='{sheet_url}', 網頁網址='{web_url}'")
                             continue
                             
                         try:
