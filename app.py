@@ -100,27 +100,41 @@ def run_ai_qa(sheet_context, img_path, lang_hint=""):
         "X-Title": "QA Checker"
     }
     
-    # 更新為目前 OpenRouter 最穩定可用的 Vision 模型清單
+    # 支援免費與高可用 Vision AI 模型
     candidate_models = [
-        "google/gemini-2.0-flash-001",
-        "google/gemini-2.0-flash-lite-001",
+        "google/gemini-2.0-flash-exp:free",
+        "meta-llama/llama-3.2-11b-vision-instruct:free",
+        "qwen/qwen-2-vl-72b-instruct:free",
         "openai/gpt-4o-mini",
-        "google/gemini-flash-1.5"
+        "google/gemini-2.0-flash-001"
     ]
 
     prompt = f"""
-    你是一名專業的資深 QA 測試工程師。
+    你是一名極度嚴苛的資深 QA 測試工程師。
     這是一張前端活動網頁與 Banner 的完整截圖{f'（指定語系：{lang_hint}）' if lang_hint else ''}。
-    【首行總結判定要求】：最第一行請務必寫【判定結果】：✅ 通過 或 【判定結果】：❌ 異常（錯處關鍵字）
-    【比對規則】：1. Banner僅檢查活動時間、時區、標題/Slogan。 2. 網頁頁面檢查其餘所有規則與獎金榜單。
-    【Excel 企劃資料】：{sheet_context}
+
+    請比對下方提供之 Excel 企劃規格，進行「字對字」嚴格比對：
+
+    【1. 🖼️ Banner 專屬檢查（必須極度嚴格）】
+    - 請先提取圖片 Banner 上顯示的「活動時間」與「時區（如 GMT-3, GMT+8 等）」。
+    - 逐字比對 Excel 規範：如果 Banner 上的時區或時間與 Excel 企劃不符（例如 Excel 寫 GMT-3，但 Banner 寫 GMT+8），必須判定為 ❌ 異常！
+
+    【2. 🌐 網頁頁面檢查】
+    - 檢查頁面活動規則、榜單獎金金額、名次與單字翻譯是否與 Excel 完全吻合。
+
+    【首行總結判定要求（必須放在最第一行）】
+    - 若完全無錯：【判定結果】：✅ 通過
+    - 若有任何錯誤：【判定結果】：❌ 異常（必須明確寫出錯處，例如：Banner時區不符、榜單金額錯誤）
+
+    【Excel 企劃規格資料】：
+    {sheet_context}
     """
 
     err_logs = []
     for model_name in candidate_models:
         payload = {
             "model": model_name,
-            "max_tokens": 1200,
+            "max_tokens": 1000,
             "messages": [
                 {
                     "role": "user",
@@ -183,7 +197,9 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                         master_sheet.update_cell(row_number, 6, short_summary if short_summary else "✅ 完成")
                         
                         st.markdown(report)
-                        time.sleep(3)
+                        
+                        # 增加至 6 秒冷卻，避免觸發 OpenRouter API 的 in_flight_budget 併發限制
+                        time.sleep(6)
                     except Exception as row_err:
                         st.error(f"❌ 處理失敗：{row_err}")
                     progress_bar.progress((index + 1) / total_items)
