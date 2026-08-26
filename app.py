@@ -99,7 +99,6 @@ def compress_image_to_base64(img_path, max_width=1000, quality=80):
         return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 def is_ai_refusal(text):
-    """檢查 AI 是否觸發安全審查拒絕回答"""
     refusal_keywords = ["抱歉", "無法進行", "無法協助", "無法提供", "sorry", "cannot assist", "unable to process"]
     return len(text) < 200 and any(kw in text.lower() for kw in refusal_keywords)
 
@@ -112,14 +111,12 @@ def run_ai_qa(sheet_context, img_path, lang_hint=""):
         "X-Title": "QA Checker"
     }
     
-    # 調整模型順序，Gemini 2.0 對非惡意商業圖片的相容度最高
     candidate_models = [
         "google/gemini-2.0-flash-001",
         "google/gemini-flash-1.5",
         "openai/gpt-4o-mini"
     ]
 
-    # 使用中性行銷專案對照語境，避免觸發 AI 安全過濾機制
     prompt = f"""
     你是一名商業數位行銷內容的專案核對人員。請比對宣傳頁面截圖與企劃檔案（目標語系：{lang_hint}）：
 
@@ -159,7 +156,6 @@ def run_ai_qa(sheet_context, img_path, lang_hint=""):
             res_data = res.json()
             if "choices" in res_data and len(res_data["choices"]) > 0:
                 answer = res_data["choices"][0]["message"]["content"]
-                # 防護機制：若模型觸發拒絕回答，自動放棄並切換下一個模型
                 if is_ai_refusal(answer):
                     err_logs.append(f"[{model_name}]: 觸發安全過濾拒絕回答，自動切換備用模型")
                     continue
@@ -217,6 +213,11 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                         master_sheet.update_cell(row_number, 6, short_summary)
                         
                         st.markdown(report)
+                        
+                        # 📸 重新補回顯示網頁/Banner 截圖
+                        if os.path.exists(img_filename):
+                            st.image(img_filename, caption=f"📸 網頁與 Banner 截圖：{campaign_name}", use_container_width=True)
+                            
                         time.sleep(2)
                     except Exception as row_err:
                         err_msg = str(row_err)
