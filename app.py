@@ -15,7 +15,7 @@ from PIL import Image
 os.system("playwright install chromium")
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
-st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (精準語系比對)")
+st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (防卡死穩定版)")
 
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
@@ -34,7 +34,7 @@ LANG_MAP = {
 }
 
 st.sidebar.header("⚙️ 系統設定")
-st.sidebar.success("✅ 系統已順利連線運作 (付費多語系通道)")
+st.sidebar.success("✅ 系統已順利連線運作 (付費通道)")
 
 mode = st.sidebar.radio("選擇對稿模式：", ["📂 批次自動對稿 (預設總控表)", "單一活動對稿"])
 
@@ -71,31 +71,27 @@ def fetch_sheet_text_and_languages(sheet_input):
         else:
             doc = client.open(sheet_input)
     except Exception as err:
-        raise RuntimeError(f"無法開啟企劃 Excel：{err}")
+        raise RuntimeError(f"無法開啟企劃 Excel（請確認權限已釋出）：{err}")
     
     content_summary = []
     detected_languages = []
     
-    # 核心修復：精準抓取第一個工作表中的「主語系(B欄)」與「附/次要語系(C欄)」
     first_sheet = doc.worksheets()[0]
     records_first = first_sheet.get_all_values()
     
     for row_idx, row in enumerate(records_first[:20]):
         row_str = "".join(row)
         if "預設語言" in row_str or "次要語言" in row_str or row_idx == 9:
-            # 讀取 B 欄 (Index 1) 主語系
             if len(row) > 1 and row[1].strip() in LANG_MAP:
                 lang_b = row[1].strip()
                 if lang_b not in detected_languages:
                     detected_languages.append(lang_b)
-            # 讀取 C 欄 (Index 2) 附語系
             if len(row) > 2 and row[2].strip() in LANG_MAP:
                 lang_c = row[2].strip()
                 if lang_c not in detected_languages:
                     detected_languages.append(lang_c)
             break
 
-    # 讀取全文內容供 AI 對照
     for sheet in doc.worksheets():
         records = sheet.get_all_values()
         clean_rows = []
@@ -118,11 +114,16 @@ def build_lang_url(base_url, lang_code):
         return f"{base_url}?lang={lang_code}"
 
 def capture_webpage(target_url, output_filename="temp_screenshot.png"):
+    """防卡死超時保護截圖邏輯"""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        page.goto(target_url)
-        page.wait_for_load_state('networkidle')
+        try:
+            # 20秒超時限制，且僅等待 DOM 加載，不等待無窮無盡的網路封包
+            page.goto(target_url, timeout=20000, wait_until="domcontentloaded")
+            time.sleep(3)  # 穩定等待 3 秒讓渲染完成
+        except Exception:
+            pass  # 就算網頁連線較慢，依然強行截取當前畫面
         page.screenshot(path=output_filename, full_page=True)
         browser.close()
     return output_filename
@@ -281,7 +282,7 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                         st.error(f"❌ 處理失敗：{err_msg}")
                         try:
                             master_sheet.update_cell(row_number, 5, False)
-                            master_sheet.update_cell(row_number, 6, "❌ 失敗 (AI拒絕/連線錯誤)")
+                            master_sheet.update_cell(row_number, 6, f"❌ 失敗：{err_msg[:30]}")
                         except Exception:
                             pass
                     progress_bar.progress((index + 1) / total_items)
