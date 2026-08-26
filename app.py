@@ -1,4 +1,3 @@
-import sys
 import re
 import os
 import io
@@ -6,14 +5,13 @@ import time
 import base64
 import requests
 import json
-import subprocess
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 from PIL import Image
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
-st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (環境路徑修復版)")
+st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統 (輕量穩定版)")
 
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
@@ -24,17 +22,6 @@ LANG_MAP = {
     "泰文": "th", "泰語": "th", "加祿文": "tl", "他加祿語": "tl", "菲律賓語": "tl",
     "印地語": "hi", "印地文": "hi", "印尼文": "id", "印尼語": "id", "西文": "es", "西班牙文": "es"
 }
-
-# 系統啟動時一次性安裝與初始化 Chromium 瀏覽器
-@st.cache_resource
-def prepare_browser_environment():
-    try:
-        subprocess.run([sys.executable, "-m", "pip", "install", "playwright"], check=False)
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
-    except Exception:
-        pass
-
-prepare_browser_environment()
 
 st.sidebar.header("⚙️ 系統設定")
 st.sidebar.success("✅ 系統已順利連線運作")
@@ -117,36 +104,24 @@ def build_lang_url(base_url, lang_code):
         return f"{base_url}?lang={lang_code}"
 
 def capture_webpage(target_url, output_filename="temp_screenshot.png"):
-    script_content = f"""
-import os
-import time
-from playwright.sync_api import sync_playwright
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'])
-    page = browser.new_page(viewport={{"width": 1280, "height": 800}})
-    try:
-        page.goto('{target_url}', timeout=20000, wait_until='domcontentloaded')
-        time.sleep(3)
-    except Exception as e:
-        pass
-    page.screenshot(path='{output_filename}', full_page=True)
-    browser.close()
-"""
-    with open("take_screenshot.py", "w", encoding="utf-8") as f:
-        f.write(script_content)
-
-    # 關鍵修正：使用 sys.executable 準確指引至 Streamlit 雲端虛擬環境的 Python 執行檔
-    try:
-        res = subprocess.run([sys.executable, "take_screenshot.py"], timeout=35, capture_output=True, text=True)
-        if res.returncode != 0:
-            raise RuntimeError(f"截圖腳本異常：{res.stderr.strip()}")
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("網頁載入超時 (35秒)，已自動阻斷避免卡死。")
-    
-    if not os.path.exists(output_filename):
-        raise RuntimeError("未能順利生成截圖檔案。")
-
+    """安全截圖邏輯：加入 Playwright 超時與異常捕捉保護"""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+        )
+        context = browser.new_context(viewport={"width": 1280, "height": 800})
+        page = context.new_page()
+        try:
+            # 15 秒硬性 Timeout，只要 DOM 加載完成就截圖，絕不無休止等待網路請求
+            page.goto(target_url, timeout=15000, wait_until='domcontentloaded')
+            time.sleep(2)
+        except Exception as e:
+            st.warning(f"⚠️ 網頁載入時間較長，已強行抓取畫面 ({e})")
+        
+        page.screenshot(path=output_filename, full_page=True)
+        browser.close()
     return output_filename
 
 def compress_image_to_base64(img_path, max_width=1000, quality=80):
@@ -221,7 +196,7 @@ def run_ai_qa(sheet_context, img_path, lang_name=""):
         }
         
         try:
-            res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=45)
+            res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=30)
             res_data = res.json()
             if "choices" in res_data and len(res_data["choices"]) > 0:
                 answer = res_data["choices"][0]["message"]["content"]
@@ -249,7 +224,7 @@ if mode == "📂 批次自動對稿 (預設總控表)":
             if rows:
                 total_items = len(rows)
                 progress_bar = st.progress(0)
-                os.makedirs("reports", exist_ok=True)
+                
                 for index, row in enumerate(rows):
                     campaign_name = row.get("活動名稱", f"活動_{index+1}")
                     sheet_url = row.get("Excel網址", "")
@@ -257,18 +232,20 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                     row_number = index + 2
                     
                     st.markdown(f"--- \n### 🔄 正在處理 [{index+1}/{total_items}]：**{campaign_name}**")
+                    
                     if not sheet_url or not web_url:
                         master_sheet.update_cell(row_number, 5, False)
                         master_sheet.update_cell(row_number, 6, "❌ 跳過 (資料不完整)")
                         continue
+                        
                     try:
-                        with st.spinner("📄 讀取企劃書語系中..."):
-                            doc_title, sheet_context, target_langs = fetch_sheet_text_and_languages(sheet_url)
+                        st.info("Step 1: 正在連結企劃檔讀取語言規格...")
+                        doc_title, sheet_context, target_langs = fetch_sheet_text_and_languages(sheet_url)
                         
                         if not target_langs:
                             target_langs = ["預設語系"]
                         
-                        st.write(f"🌐 目標檢查語系：`{', '.join(target_langs)}`")
+                        st.write(f"🌐 判定需檢查語系：`{', '.join(target_langs)}`")
                         
                         overall_passed = True
                         summary_list = []
@@ -277,14 +254,14 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                             lang_code = LANG_MAP.get(lang_name, "")
                             target_lang_url = build_lang_url(web_url, lang_code) if lang_code else web_url
                             
-                            st.markdown(f"#### 🌐 語系對稿：**{lang_name}** (`{target_lang_url}`)")
+                            st.markdown(f"#### 🌐 語系檢查中：**{lang_name}** (`{target_lang_url}`)")
                             img_filename = f"temp_{index}_{lang_name}.png"
                             
-                            with st.spinner(f"📸 獨立進程安全截圖中 ({lang_name})..."):
-                                capture_webpage(target_lang_url, img_filename)
-                                
-                            with st.spinner(f"🤖 Vision AI 嚴格比對中 ({lang_name})..."):
-                                report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name)
+                            st.info(f"Step 2: 正在開啟網頁並擷取截圖 [{lang_name}]...")
+                            capture_webpage(target_lang_url, img_filename)
+                            
+                            st.info(f"Step 3: AI 視覺模型正在比對內容 [{lang_name}]...")
+                            report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name)
                             
                             first_line = report.strip().split('\n')[0]
                             if "❌" in first_line or "異常" in first_line or "不符" in first_line:
@@ -304,12 +281,13 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                         
                     except Exception as row_err:
                         err_msg = str(row_err)
-                        st.error(f"❌ 處理失敗：{err_msg}")
+                        st.error(f"❌ 本項目處理失敗：{err_msg}")
                         try:
                             master_sheet.update_cell(row_number, 5, False)
                             master_sheet.update_cell(row_number, 6, f"❌ 失敗：{err_msg[:30]}")
                         except Exception:
                             pass
+                    
                     progress_bar.progress((index + 1) / total_items)
         except Exception as e:
             st.error(f"執行總控失敗：{e}")
