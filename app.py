@@ -32,13 +32,13 @@ def extract_sheet_id(url):
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     
-    # 【改為直接解析整塊 JSON 文字，避開 TOML 換行錯誤】
     if "GCP_CREDENTIALS" in st.secrets:
         try:
-            creds_dict = json.loads(st.secrets["GCP_CREDENTIALS"])
+            # 加入 strict=False 允許解析包含控制字元/換行符號的私鑰
+            creds_dict = json.loads(st.secrets["GCP_CREDENTIALS"], strict=False)
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         except Exception as e:
-            raise RuntimeError(f"解析 GCP 金鑰失敗，請確認 Secrets 內的 JSON 格式是否完整。錯誤: {e}")
+            raise RuntimeError(f"解析 GCP 金鑰失敗: {e}")
     else:
         creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
         
