@@ -65,9 +65,20 @@ def fetch_sheet_text(sheet_input):
     content_summary = []
     for sheet in doc.worksheets():
         records = sheet.get_all_values()
-        sheet_text = f"\n--- 分頁名稱: {sheet.title} ---\n" + "\n".join([", ".join(row) for row in records[:50]])
-        content_summary.append(sheet_text)
-    return doc.title, "\n".join(content_summary)
+        clean_rows = []
+        for row in records[:25]:  # 精簡列數
+            row_str = ", ".join([str(cell).strip() for cell in row if str(cell).strip()])
+            if row_str:
+                clean_rows.append(row_str)
+        if clean_rows:
+            sheet_text = f"\n--- 分頁: {sheet.title} ---\n" + "\n".join(clean_rows)
+            content_summary.append(sheet_text)
+    
+    full_text = "\n".join(content_summary)
+    if len(full_text) > 3000:
+        full_text = full_text[:3000] + "\n...(企劃內容過長已自動精簡)..."
+        
+    return doc.title, full_text
 
 def capture_webpage(target_url, output_filename="temp_screenshot.png"):
     with sync_playwright() as p:
@@ -100,13 +111,10 @@ def run_ai_qa(sheet_context, img_path, lang_hint=""):
         "X-Title": "QA Checker"
     }
     
-    # 支援免費與高可用 Vision AI 模型
     candidate_models = [
-        "google/gemini-2.0-flash-exp:free",
-        "meta-llama/llama-3.2-11b-vision-instruct:free",
-        "qwen/qwen-2-vl-72b-instruct:free",
+        "google/gemini-2.0-flash-001",
         "openai/gpt-4o-mini",
-        "google/gemini-2.0-flash-001"
+        "google/gemini-flash-1.5"
     ]
 
     prompt = f"""
@@ -183,6 +191,7 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                     row_number = index + 2
                     st.markdown(f"--- \n### 🔄 正在處理 [{index+1}/{total_items}]：**{campaign_name}** ({lang})")
                     if not sheet_url or not web_url:
+                        master_sheet.update_cell(row_number, 5, False)
                         master_sheet.update_cell(row_number, 6, "❌ 跳過 (資料不完整)")
                         continue
                     try:
@@ -191,17 +200,34 @@ if mode == "📂 批次自動對稿 (預設總控表)":
                         capture_webpage(web_url, img_filename)
                         report, model_used = run_ai_qa(sheet_context, img_filename, lang_hint=lang)
                         
+                        # 嚴嚴格格解析 AI 首行結果
                         first_line = report.strip().split('\n')[0]
-                        short_summary = first_line.replace("【判定結果】：", "").replace("【判定結果】:", "").strip()
+                        if "【判定結果】" in first_line:
+                            short_summary = first_line.replace("【判定結果】：", "").replace("【判定結果】:", "").strip()
+                        elif "❌" in report or "異常" in report or "不符" in report:
+                            short_summary = "❌ 異常 (見報告)"
+                        elif "✅" in report or "通過" in report:
+                            short_summary = "✅ 通過"
+                        else:
+                            short_summary = "⚠️ 需人工檢核"
+
                         master_sheet.update_cell(row_number, 5, True)
-                        master_sheet.update_cell(row_number, 6, short_summary if short_summary else "✅ 完成")
+                        master_sheet.update_cell(row_number, 6, short_summary)
                         
                         st.markdown(report)
-                        
-                        # 增加至 6 秒冷卻，避免觸發 OpenRouter API 的 in_flight_budget 併發限制
-                        time.sleep(6)
+                        time.sleep(5)
                     except Exception as row_err:
-                        st.error(f"❌ 處理失敗：{row_err}")
+                        err_msg = str(row_err)
+                        st.error(f"❌ 處理失敗：{err_msg}")
+                        # 核心修復：只要對稿過程失敗，強制將 E 欄設為 FALSE，F 欄寫入真實失敗原因
+                        try:
+                            master_sheet.update_cell(row_number, 5, False)
+                            if "tokens limit" in err_msg.lower() or "credits" in err_msg.lower():
+                                master_sheet.update_cell(row_number, 6, "❌ 失敗 (Token/額度不足)")
+                            else:
+                                master_sheet.update_cell(row_number, 6, "❌ 失敗 (API呼叫失敗)")
+                        except Exception:
+                            pass
                     progress_bar.progress((index + 1) / total_items)
         except Exception as e:
             st.error(f"執行失敗：{e}")
