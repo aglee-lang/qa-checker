@@ -212,7 +212,12 @@ def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"
     prompt = f"""
     你是一名商業數位行銷內容的專案核對人員。請比對宣傳頁面截圖（目標語系：【{lang_name}】）與企劃規格檔案：
 
-    【🎯 核心時間驗證任務（請仔細對照圖片）】：
+    【🚨 網頁連線狀態優先檢查】：
+    - 請先確認圖片是否為 HTTP 錯誤頁面（例如印有 "502 Bad Gateway"、"404 Not Found"、"500 Internal Server Error" 或 nginx 錯誤）。
+    - ⚠️ 若圖片為 502/404 等錯誤畫面，請【第一行直接輸出】：
+      【判定結果】：❌ 網頁無法存取 (502 Bad Gateway / 目標伺服器未開啟或連線異常)
+
+    【🎯 時間驗證任務（正常網頁時執行）】：
     1. 企劃指定之【活動時差統一】：【{target_timezone}】。
     2. 依據時區規範，Banner 紅色/黃色時間區塊內【正確應顯示的時間】為：開始【{expected_start}】、結束【{expected_end}】。
     3. 🔍 請放大檢視圖片 Banner 底部時間框內的文字：
@@ -224,7 +229,7 @@ def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"
 
     【首行格式要求（必須放在第一行）】：
     - 若完全無誤：【判定結果】：✅ 通過
-    - 若有任何不符：【判定結果】：❌ 異常（簡短指出錯處）
+    - 若有任何不符或連線失敗：【判定結果】：❌ 異常（簡短指出錯處）
 
     【企劃規格內容】：
     {sheet_context}
