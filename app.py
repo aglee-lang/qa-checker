@@ -133,38 +133,55 @@ def generate_fallback_error_image(output_filename, url):
     return output_filename
 
 def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
+    """RD 環境優化版：優先繼承本機 Chrome 核心並隱藏自動化特徵"""
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-gpu',
-                    '--ignore-certificate-errors',
-                    '--allow-insecure-localhost'
-                ]
-            )
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                bypass_csp=True,
-                ignore_https_errors=True
-            )
-            page = context.new_page()
-            try:
-                page.goto(target_url, timeout=12000, wait_until='domcontentloaded')
-                page.wait_for_timeout(4000)
-                page.mouse.wheel(0, 300)
-                page.wait_for_timeout(1000)
-                page.screenshot(path=output_filename, full_page=True)
-                browser.close()
-                if os.path.exists(output_filename) and os.path.getsize(output_filename) > 5000:
-                    return output_filename
-            except Exception:
-                browser.close()
+            browser = None
+            # 優先嘗試系統 Chrome/Edge，能直接繼承本機 VPN 路由與 SSL 憑證
+            for channel_name in ["chrome", "msedge", None]:
+                try:
+                    launch_kwargs = {
+                        "headless": True,
+                        "args": [
+                            '--no-sandbox',
+                            '--disable-dev-shm-usage',
+                            '--disable-blink-features=AutomationControlled',
+                            '--disable-gpu',
+                            '--ignore-certificate-errors',
+                            '--disable-web-security',
+                            '--allow-running-insecure-content'
+                        ]
+                    }
+                    if channel_name:
+                        launch_kwargs["channel"] = channel_name
+                    browser = p.chromium.launch(**launch_kwargs)
+                    break
+                except Exception:
+                    continue
+
+            if browser:
+                context = browser.new_context(
+                    viewport={"width": 1280, "height": 900},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    bypass_csp=True,
+                    ignore_https_errors=True
+                )
+                page = context.new_page()
+                # 反爬蟲注入：消除 webdriver 標記
+                page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+                try:
+                    page.goto(target_url, timeout=20000, wait_until='domcontentloaded')
+                    page.wait_for_timeout(5000)
+                    page.mouse.wheel(0, 300)
+                    page.wait_for_timeout(1000)
+                    page.screenshot(path=output_filename, full_page=True)
+                    browser.close()
+                    if os.path.exists(output_filename) and os.path.getsize(output_filename) > 5000:
+                        return output_filename
+                except Exception:
+                    browser.close()
     except Exception:
         pass
 
@@ -197,7 +214,6 @@ def compress_image_to_base64(img_path, max_width=1000, quality=80):
         return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 def is_ai_refusal(text):
-    # 精準過濾真正的 AI 系統面拒絕，避免誤殺正當的 QA 報告
     refusal_keywords = ["cannot assist", "as an ai", "i am an ai", "as a language model"]
     return len(text) < 100 and any(kw in text.lower() for kw in refusal_keywords)
 
@@ -210,7 +226,6 @@ def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"
         "X-Title": "QA Checker"
     }
     
-    # 修正為正確且穩定的 OpenRouter 模型代碼
     candidate_models = [
         "openai/gpt-4o-mini",
         "google/gemini-2.0-flash-001",
