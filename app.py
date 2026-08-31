@@ -9,7 +9,7 @@ import urllib.parse
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
 st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統")
@@ -125,7 +125,6 @@ def build_lang_url(base_url, lang_code):
         return f"{base_url}?lang={lang_code}"
 
 def generate_fallback_error_image(output_filename, url):
-    """當連線被防火牆封鎖時，生成一張替代的錯誤判定圖檔"""
     img = Image.new('RGB', (1280, 400), color=(40, 40, 40))
     d = ImageDraw.Draw(img)
     text = f"HTTP CONNECTION ERROR (502 / BLOCKED BY FIREWALL)\nURL: {url}"
@@ -134,7 +133,6 @@ def generate_fallback_error_image(output_filename, url):
     return output_filename
 
 def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
-    """增強版截圖器：包含無視安全限制與平滑降級"""
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -184,7 +182,6 @@ def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
     except Exception:
         pass
 
-    # 若全數失敗，生成連線失敗圖檔傳給 AI 判定
     return generate_fallback_error_image(output_filename, target_url)
 
 def compress_image_to_base64(img_path, max_width=1000, quality=80):
@@ -200,8 +197,9 @@ def compress_image_to_base64(img_path, max_width=1000, quality=80):
         return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 def is_ai_refusal(text):
-    refusal_keywords = ["抱歉", "無法進行", "無法協助", "無法提供", "sorry", "cannot assist", "unable to process", "as an ai"]
-    return len(text) < 200 and any(kw in text.lower() for kw in refusal_keywords)
+    # 精準過濾真正的 AI 系統面拒絕，避免誤殺正當的 QA 報告
+    refusal_keywords = ["cannot assist", "as an ai", "i am an ai", "as a language model"]
+    return len(text) < 100 and any(kw in text.lower() for kw in refusal_keywords)
 
 def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"):
     base64_image = compress_image_to_base64(img_path)
@@ -212,11 +210,11 @@ def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"
         "X-Title": "QA Checker"
     }
     
+    # 修正為正確且穩定的 OpenRouter 模型代碼
     candidate_models = [
+        "openai/gpt-4o-mini",
         "google/gemini-2.0-flash-001",
-        "google/gemini-2.0-flash-lite-001",
-        "google/gemini-flash-1.5",
-        "openai/gpt-4o-mini"
+        "google/gemini-1.5-flash"
     ]
 
     tz_rule_info = TIMEZONE_RULES.get(target_timezone, {})
