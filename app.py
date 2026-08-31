@@ -14,7 +14,8 @@ from PIL import Image
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
 st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統")
 
-OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "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")
+# 安全讀取 Secrets，移除硬編碼金鑰以防外洩
+OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
 
 LANG_MAP = {
