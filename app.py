@@ -14,7 +14,7 @@ from PIL import Image
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
 st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統")
 
-# 安全讀取 Secrets，移除硬編碼金鑰以防外洩
+# 安全讀取 Secrets
 OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
 MASTER_SHEET_URL = "https://docs.google.com/spreadsheets/d/1oQmf3yeW2KK9bSI8VV8bMpWLC4vXuT0078CLEBa5aIw/edit?gid=0#gid=0"
 
@@ -211,19 +211,19 @@ def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"
     expected_end = tz_rule_info.get("end", "")
 
     prompt = f"""
-    你是一名商業數位行銷內容的專案核對人員。請比對宣傳頁面截圖（目標語系：【{lang_name}】）與企劃規格檔案：
+    你是一名商業數位行銷內容的專業 QA 核對人員。請比對宣傳頁面截圖（目標語系：【{lang_name}】）與企劃規格檔案：
 
-    【🚨 網頁連線狀態優先檢查】：
-    - 請先確認圖片是否為 HTTP 錯誤頁面（例如印有 "502 Bad Gateway"、"404 Not Found"、"500 Internal Server Error" 或 nginx 錯誤）。
-    - ⚠️ 若圖片為 502/404 等錯誤畫面，請【第一行直接輸出】：
+    【🚨 網頁連線狀態檢測】：
+    - 若圖片印有 "502 Bad Gateway"、"404 Not Found"、"500 Internal Server Error" 等伺服器錯誤畫面，首行直接輸出：
       【判定結果】：❌ 網頁無法存取 (502 Bad Gateway / 目標伺服器未開啟或連線異常)
 
-    【🎯 時間驗證任務（正常網頁時執行）】：
+    【🧠 智慧日期與時間語意比對】：
     1. 企劃指定之【活動時差統一】：【{target_timezone}】。
-    2. 依據時區規範，Banner 紅色/黃色時間區塊內【正確應顯示的時間】為：開始【{expected_start}】、結束【{expected_end}】。
-    3. 🔍 請放大檢視圖片 Banner 底部時間框內的文字：
-       - 如果圖片上明確印著【{expected_start}】與【{expected_end}】（例如 "11:00 AM - 10:59 AM"），代表時間完全正確！【必須判定為 ✅ 通過】！
-       - 只有當圖片上顯示的時間文字真的不符合【{expected_start} - {expected_end}】時，才判定為 ❌ 異常。
+    2. 依據時區規範，時間欄位【正確標準時間】為：開始【{expected_start}】、結束【{expected_end}】。
+    3. 🔍 [日期與月份多語系智慧對照]：
+       - 請自動進行跨語系與格式轉換（例如：英文 "AUG 30" = "8月30日" = "8/30"；"SEP 4" = "9月4日" = "9/4"；葡文 "5 de setembro" = "9月5日"）。
+       - 只要圖片上印製的「日期」與企劃規定的日期代表同一天，且「時間」符合【{expected_start} - {expected_end}】（例如 Banner 顯示 "AUG 30 11:00 AM - SEP 4 10:59 AM"），請判定為 ✅ 通過！
+       - 只有當「日期日數出錯」或「時間小時/分/AM PM」真的不吻合時，才判定為 ❌ 異常。
 
     【🌐 網頁翻譯與規則比對】：
     - 比對活動規則說明、榜單金額與【{lang_name}】標題翻譯是否吻合。
