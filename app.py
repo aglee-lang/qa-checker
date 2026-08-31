@@ -9,7 +9,7 @@ import urllib.parse
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 st.set_page_config(page_title="AI 自動 QA 對稿工具", layout="wide")
 st.title("🤖 AI 網頁與 Banner 自動 QA 對稿系統")
@@ -35,7 +35,7 @@ TIMEZONE_RULES = {
 }
 
 st.sidebar.header("⚙️ 系統設定")
-st.sidebar.success("✅ 系統運作正常 (零溫度精準對比)")
+st.sidebar.success("✅ 系統運作正常")
 
 def extract_sheet_id(url):
     match = re.search(r'/d/([a-zA-Z0-9-_]+)', url)
@@ -124,7 +124,17 @@ def build_lang_url(base_url, lang_code):
     else:
         return f"{base_url}?lang={lang_code}"
 
+def generate_fallback_error_image(output_filename, url):
+    """當連線被防火牆封鎖時，生成一張替代的錯誤判定圖檔"""
+    img = Image.new('RGB', (1280, 400), color=(40, 40, 40))
+    d = ImageDraw.Draw(img)
+    text = f"HTTP CONNECTION ERROR (502 / BLOCKED BY FIREWALL)\nURL: {url}"
+    d.text((50, 180), text, fill=(255, 100, 100))
+    img.save(output_filename)
+    return output_filename
+
 def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
+    """增強版截圖器：包含無視安全限制與平滑降級"""
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -134,7 +144,9 @@ def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-blink-features=AutomationControlled',
-                    '--disable-gpu'
+                    '--disable-gpu',
+                    '--ignore-certificate-errors',
+                    '--allow-insecure-localhost'
                 ]
             )
             context = browser.new_context(
@@ -145,34 +157,35 @@ def capture_webpage_safe(target_url, output_filename="temp_screenshot.png"):
             )
             page = context.new_page()
             try:
-                page.goto(target_url, timeout=15000, wait_until='domcontentloaded')
-                page.wait_for_timeout(6000)
+                page.goto(target_url, timeout=12000, wait_until='domcontentloaded')
+                page.wait_for_timeout(4000)
                 page.mouse.wheel(0, 300)
                 page.wait_for_timeout(1000)
+                page.screenshot(path=output_filename, full_page=True)
+                browser.close()
+                if os.path.exists(output_filename) and os.path.getsize(output_filename) > 5000:
+                    return output_filename
             except Exception:
-                pass
-            page.screenshot(path=output_filename, full_page=True)
-            browser.close()
-            if os.path.exists(output_filename) and os.path.getsize(output_filename) > 5000:
-                return output_filename
+                browser.close()
     except Exception:
         pass
 
     try:
         encoded_url = urllib.parse.quote(target_url, safe='')
         api_url = f"https://api.microlink.io/?url={encoded_url}&screenshot=true&meta=false"
-        res = requests.get(api_url, timeout=20)
+        res = requests.get(api_url, timeout=15)
         res_data = res.json()
         if res_data.get("status") == "success":
             img_url = res_data["data"]["screenshot"]["url"]
-            img_bytes = requests.get(img_url, timeout=20).content
+            img_bytes = requests.get(img_url, timeout=15).content
             with open(output_filename, "wb") as f:
                 f.write(img_bytes)
             return output_filename
     except Exception:
         pass
 
-    raise RuntimeError("無法存取目標網頁截圖 (請確認網址是否可正常連線)")
+    # 若全數失敗，生成連線失敗圖檔傳給 AI 判定
+    return generate_fallback_error_image(output_filename, target_url)
 
 def compress_image_to_base64(img_path, max_width=1000, quality=80):
     with Image.open(img_path) as img:
@@ -213,17 +226,18 @@ def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"
     prompt = f"""
     你是資深 QA 測試工程師。請針對「網頁/Banner 截圖（對稿語系：{lang_name}）」與「企劃規格檔」進行【兩步驟對照】：
 
-    【第一步：客觀抄寫視覺文字】
-    1. 🔍 抄寫圖片上印出的大字標題（例如 "2026 BRAZIL INDEPENDENCE DAY"）。
-    2. 🔍 抄寫圖片黃框/紅框內的完整時間標籤（例如 "09/05 01:00 AM – 09/10 00:59 AM"）。
+    【第一步：連線狀態與視覺抄寫】
+    1. 🚨 檢查圖片是否包含 "HTTP CONNECTION ERROR"、"502 Bad Gateway" 或 404/500 錯誤。
+       若有，第一行請輸出：【判定結果】：❌ 網頁無法存取 (目標伺服器連線失敗/防火牆封鎖雲端IP)
+    2. 🔍 抄寫圖片上印出的大字標題（例如 "2026 BRAZIL INDEPENDENCE DAY"）。
+    3. 🔍 抄寫圖片黃框/紅框內的完整時間標籤（例如 "09/05 01:00 AM – 09/10 00:59 AM"）。
 
     【第二步：規格對照驗證】
-    1. 網頁狀態：若包含 502/404 等錯誤畫面，第一行輸出：【判定結果】：❌ 網頁無法存取 (伺服器連線失敗)
-    2. 時間與時區：
+    1. 時間與時區：
        - 時區規範：【{target_timezone}】對應時間為【{expected_start} – {expected_end}】。
        - 日期等值：09/05 = 9/5 = 5 de setembro = Sep 5。
        - 只要抄寫出的「日期數字」與企劃相同，且「時間」為【{expected_start} – {expected_end}】，時間即判定合格！
-    3. 年份與標題：仔細對照圖片大字標題中的年份（如 2026）與企劃是否相符，請勿把藝術字體的 2026 錯看成其他年份。
+    2. 年份與標題：仔細對照圖片大字標題中的年份（如 2026）與企劃是否相符。
 
     【輸出格式規範】
     第一行必須嚴格寫出最終 verdict：
@@ -240,7 +254,7 @@ def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"
         payload = {
             "model": model_name,
             "max_tokens": 1200,
-            "temperature": 0.0,  # 零隨機性：確保 Vision OCR 不產生幻覺
+            "temperature": 0.0,
             "messages": [
                 {
                     "role": "user",
