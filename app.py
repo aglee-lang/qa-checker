@@ -35,7 +35,7 @@ TIMEZONE_RULES = {
 }
 
 st.sidebar.header("⚙️ 系統設定")
-st.sidebar.success("✅ 系統運作正常")
+st.sidebar.success("✅ 系統運作正常 (零溫度精準對比)")
 
 def extract_sheet_id(url):
     match = re.search(r'/d/([a-zA-Z0-9-_]+)', url)
@@ -211,25 +211,25 @@ def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"
     expected_end = tz_rule_info.get("end", "")
 
     prompt = f"""
-    你是資深 QA 測試工程師。請比對「宣傳網頁截圖（語系：{lang_name}）」與「企劃規格檔」：
+    你是資深 QA 測試工程師。請針對「網頁/Banner 截圖（對稿語系：{lang_name}）」與「企劃規格檔」進行【兩步驟對照】：
 
-    【關卡 1：網頁連線狀態】
-    - 若截圖包含 502 / 404 等伺服器錯誤，第一行輸出：【判定結果】：❌ 網頁無法存取 (伺服器連線失敗)
+    【第一步：客觀抄寫視覺文字】
+    1. 🔍 抄寫圖片上印出的大字標題（例如 "2026 BRAZIL INDEPENDENCE DAY"）。
+    2. 🔍 抄寫圖片黃框/紅框內的完整時間標籤（例如 "09/05 01:00 AM – 09/10 00:59 AM"）。
 
-    【關卡 2：Banner 時間與日期核對】
-    - 企劃指定時區：【{target_timezone}】
-    - 時區規範時間：開始為【{expected_start}】、結束為【{expected_end}】
-    - 智慧比對邏輯：
-      1. 請檢查圖片 Banner 上黃色/紅色框內的時間文字。
-      2. 數字日期（如 09/05、9/5、Sep 5、5 de setembro）代表同一天。
-      3. 只要 Banner 上的「月份、日期」與企劃相同，且「時間」為【{expected_start} – {expected_end}】，即為完全正確！
-      👉 符合上述標準時，第一行必須輸出：【判定結果】：✅ 通過
+    【第二步：規格對照驗證】
+    1. 網頁狀態：若包含 502/404 等錯誤畫面，第一行輸出：【判定結果】：❌ 網頁無法存取 (伺服器連線失敗)
+    2. 時間與時區：
+       - 時區規範：【{target_timezone}】對應時間為【{expected_start} – {expected_end}】。
+       - 日期等值：09/05 = 9/5 = 5 de setembro = Sep 5。
+       - 只要抄寫出的「日期數字」與企劃相同，且「時間」為【{expected_start} – {expected_end}】，時間即判定合格！
+    3. 年份與標題：仔細對照圖片大字標題中的年份（如 2026）與企劃是否相符，請勿把藝術字體的 2026 錯看成其他年份。
 
-    【關卡 3：活動規則與翻譯核對】
-    - 檢查頁面標題、規則內文是否與【{lang_name}】企劃規範相符。
-
-    【格式要求】
-    - 第一行必須為：【判定結果】：✅ 通過 或 【判定結果】：❌ 異常（簡短指出錯處）
+    【輸出格式規範】
+    第一行必須嚴格寫出最終 verdict：
+    【判定結果】：✅ 通過 
+    或 
+    【判定結果】：❌ 異常（指出明確錯處）
 
     【企劃規格內容】：
     {sheet_context}
@@ -240,6 +240,7 @@ def run_ai_qa(sheet_context, img_path, lang_name="", target_timezone="未指定"
         payload = {
             "model": model_name,
             "max_tokens": 1200,
+            "temperature": 0.0,  # 零隨機性：確保 Vision OCR 不產生幻覺
             "messages": [
                 {
                     "role": "user",
@@ -317,7 +318,7 @@ if st.button("🚀 開始批次全自動對稿", type="primary"):
                             img_filename = f"temp_{index}_{lang_name}.png"
                             capture_webpage_safe(target_lang_url, img_filename)
                             
-                            st.write(f"🤖 **[3/3]** Vision AI 依據時區【{target_timezone}】進行精準對照驗證...")
+                            st.write(f"🤖 **[3/3]** Vision AI 進行精準字對字與時區對照驗證...")
                             report, model_used = run_ai_qa(sheet_context, img_filename, lang_name=lang_name, target_timezone=target_timezone)
                             
                             first_line = report.strip().split('\n')[0]
